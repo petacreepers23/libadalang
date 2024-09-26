@@ -1,0 +1,29 @@
+driver: java
+mode: graal_c_api
+java_path: ../
+main_class: ProjectManager
+projects_path: ../sources/
+sync_trees:
+  - ../sources/src1/
+setup_script: |
+    # Generate a CGPR for Ada
+    cgpr_file = self.working_dir("custom.cgpr")
+    self.shell(
+        ["gprconfig", "--batch", "--config=Ada", "-o", cgpr_file],
+        analyze_output=False,
+    )
+
+    # Customize it so that Ada specs are supposed to have ".1.ada" extensions
+    with open(cgpr_file) as f:
+        content = f.read()
+    content = content.replace(
+        'for Spec_Suffix ("Ada") use ".ads";',
+        'for Spec_Suffix ("Ada") use ".1.ada";',
+    )
+    content = content.replace(
+        'for Spec_Suffix ("Ada") use ".adb";',
+        'for Spec_Suffix ("Ada") use ".2.ada";',
+    )
+    with open(cgpr_file, "w") as f:
+        f.write(content)
+canonicalize_directory_separators: true

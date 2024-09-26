@@ -3,36 +3,36 @@ procedure Test is
    B : constant Boolean := False;
 
    procedure Pouet0 is null;
-   --% $node.p_has_aspect('inline')
+   --% node.p_has_aspect('inline')
 
    procedure Pouet1 is null
       with Inline;
-   --% $node.p_has_aspect('inline')
+   --% node.p_has_aspect('inline')
 
    procedure Pouet2 is null
       with Inline => A and B;
-   --% $node.p_has_aspect('inline')
+   --% node.p_has_aspect('inline')
 
    procedure Pouet3 is null
       with Inline => A or B;
-   --% $node.p_has_aspect('inline')
+   --% node.p_has_aspect('inline')
 
    procedure Pouet4 is null
       with Inline => True;
-   --% $node.p_has_aspect('inline')
+   --% node.p_has_aspect('inline')
 
    procedure Pouet5 is null
       with Inline => False;
-   --% $node.p_has_aspect('inline')
+   --% node.p_has_aspect('inline')
 
    type Small is record
       A, B : Character;
    end record;
-   --% $node.p_has_aspect('size')
+   --% node.p_has_aspect('size')
    for Small'Size use 0;
 
    type Angle is delta Pi/2.0**31 range -Pi .. Pi;
-   --% $node.p_has_aspect('small')
+   --% node.p_has_aspect('small')
    for Angle'Small use 0.001;
 
    function Foo (X : Integer) return Boolean is (True);
@@ -43,6 +43,12 @@ procedure Test is
    --% node.p_has_aspect("pre")
    --% node.p_has_aspect("pre'class")
    --% node.p_has_aspect("invariant")
+
+   Op : access function (Arg1 : Integer; Arg2 : Integer) return Integer
+     with Import => True,
+       Convention => C,
+       External_Name => "op";
+   --% node.p_has_aspect("convention")
 begin
    null;
 end Test;

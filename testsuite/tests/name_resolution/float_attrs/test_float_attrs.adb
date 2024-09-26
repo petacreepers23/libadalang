@@ -52,6 +52,30 @@ procedure Test_Float_Attrs is
 
    R : Boolean := Float'Machine_Rounds;
    pragma Test_Statement;
+
+   S : Float := Float'Machine (1.0E+11);
+   pragma Test_Statement;
+
+   T : Float := Float'Compose(A, 2);
+   pragma Test_Statement;
+
+   U : Float := Float'Fraction (A);
+   pragma Test_Statement;
+
+   V : Integer := Float'Machine_Emin;
+   pragma Test_Statement;
+
+   W : Integer := Float'Machine_Emax;
+   pragma Test_Statement;
+
+   X : Float := Float'Safe_First;
+   pragma Test_Statement;
+
+   Y : Float := Float'Safe_Last;
+   pragma Test_Statement;
+
+   Z : Float := Float'Round (1.23);
+   pragma Test_Statement;
 begin
    null;
 end Test_Float_Attrs;

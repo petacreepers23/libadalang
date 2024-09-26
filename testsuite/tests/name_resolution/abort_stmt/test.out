@@ -5,15 +5,37 @@ Resolving xrefs for node <AbortStmt testabort.adb:35:4-35:12>
 *************************************************************
 
 Expr: <Id "T" testabort.adb:35:10-35:11>
-  references: <DefiningName testabort.adb:5:12-5:13>
-  type:       <SingleTaskTypeDecl ["T"] testabort.adb:5:12-6:12>
+  references:    <DefiningName "T" testabort.adb:5:12-5:13>
+  type:          <SingleTaskTypeDecl ["T"] testabort.adb:5:12-6:12>
+  expected type: None
 
 Resolving xrefs for node <AbortStmt testabort.adb:38:4-38:13>
 *************************************************************
 
 Expr: <Id "T2" testabort.adb:38:10-38:12>
-  references: <DefiningName testabort.adb:31:4-31:6>
-  type:       <TaskTypeDecl ["My_Task_Type"] testabort.adb:20:4-21:21>
+  references:    <DefiningName "T2" testabort.adb:31:4-31:6>
+  type:          <TaskTypeDecl ["My_Task_Type"] testabort.adb:20:4-21:21>
+  expected type: None
+
+
+Analyzing derived.adb
+#####################
+
+Resolving xrefs for node <AbortStmt derived.adb:15:7-15:15>
+***********************************************************
+
+Expr: <Id "X" derived.adb:15:13-15:14>
+  references:    <DefiningName "X" derived.adb:13:20-13:21>
+  type:          <SubtypeDecl ["ST"] derived.adb:10:4-10:20>
+  expected type: None
+
+Resolving xrefs for node <AbortStmt derived.adb:21:7-21:15>
+***********************************************************
+
+Expr: <Id "X" derived.adb:21:13-21:14>
+  references:    <DefiningName "X" derived.adb:19:20-19:21>
+  type:          <ConcreteTypeDecl ["NT"] derived.adb:11:4-11:21>
+  expected type: None
 
 
 Done.

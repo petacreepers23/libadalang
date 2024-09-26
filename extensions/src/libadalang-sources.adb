@@ -1,25 +1,7 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Interfaces; use Interfaces;
 
@@ -94,6 +76,14 @@ package body Libadalang.Sources is
       Result      : Text_Type (Name'Range);
       Result_Last : Integer := Name'First - 1;
 
+      Fold_Casing : Boolean := True;
+      --  Whether we need to fold casing.
+      --
+      --  Our goal here is to fold the casing of everything but character
+      --  literals, so that 'A' and 'a' stay different. Single quotes can
+      --  appear in other context through (Pre'Class), so disable case folding
+      --  only when the first codepoint is a single quote.
+
       I : Positive := Name'First;
    begin
       --  Decode bracket encodings
@@ -125,15 +115,23 @@ package body Libadalang.Sources is
                I := J;
 
             else
-               --  Otherwise, just copy the chararcters
+               --  Otherwise, just copy the characters
 
                Result (Result_Last) := C;
             end if;
          end;
 
-         --  Now, perform case folding
+         --  Disable case folding if the first codepoint is a single quote
 
-         Result (Result_Last) := To_Lower (Result (Result_Last));
+         if I = Name'First and then Result (Result_Last) = ''' then
+            Fold_Casing := False;
+         end if;
+
+         --  Perform case folding when appropriate
+
+         if Fold_Casing then
+            Result (Result_Last) := To_Lower (Result (Result_Last));
+         end if;
 
          I := I + 1;
       end loop;
@@ -326,12 +324,24 @@ package body Libadalang.Sources is
       --  empty, or in the corresponding base otherwise. This slice cannot be
       --  empty and can contain underscores.
 
+      Fraction : String_Slice;
+      --  Slice for the fractional numeral of the number, to be interpreted in
+      --  base 10 if Base is empty, or in the corresponding base otherwise.
+      --  This slice can contain underscores. It is empty for integer literals
+      --  and non-empty for real literals. The leading `.` character is
+      --  stripped.
+
       Exponent : Integer;
       --  Exponent to apply to Numeral, so that the designated number is::
       --
-      --     Numeral * 10 ** Exponent.
+      --     Numeral * Base ** Exponent.
    end record;
    --  Result of the analysis of a numeric literal string
+
+   function Is_Empty
+     (Slice : String_Slice) return Boolean is
+     (Slice.Last < Slice.First);
+   --  Return whether the given slice is empty
 
    function Parse_Numeric_Literal
      (Text : Text_Type) return Parsed_Numeric_Literal;
@@ -415,29 +425,41 @@ package body Libadalang.Sources is
 
       Base_First_Delimiter  : Index := No_Index;
       Base_Second_Delimiter : Index := No_Index;
+      Radix_Point           : Index := No_Index;
    begin
       if Text = "" then
          Error;
       end if;
 
-      --  First, look for the two base delimiters ('#' or ':' characters)
+      --  First, look for the two base delimiters ('#' or ':' characters) and
+      --  the radix point character: '.'.
       for I in Text'Range loop
-         if Text (I) in '#' | ':' then
-            if Base_Second_Delimiter /= No_Index then
-               Error;
-            elsif Base_First_Delimiter /= No_Index then
-               Base_Second_Delimiter := I;
-
-               --  When we have the second delimiter, make sure it is the same
-               --  as the first one.
-               if Text (Base_First_Delimiter) /= Text (Base_Second_Delimiter)
-               then
+         case Text (I) is
+            when '#' | ':' =>
+               if Base_Second_Delimiter /= No_Index then
                   Error;
+               elsif Base_First_Delimiter /= No_Index then
+                  Base_Second_Delimiter := I;
+
+                  --  When we have the second delimiter, make sure it is the
+                  --  same as the first one.
+                  if Text (Base_First_Delimiter)
+                    /= Text (Base_Second_Delimiter)
+                  then
+                     Error;
+                  end if;
+               else
+                  Base_First_Delimiter := I;
                end if;
-            else
-               Base_First_Delimiter := I;
-            end if;
-         end if;
+            when '.' =>
+               if Radix_Point /= No_Index then
+                  Error;
+               else
+                  Radix_Point := I;
+               end if;
+            when others =>
+               null;
+         end case;
       end loop;
 
       --  Either only two are present, either no one is
@@ -519,6 +541,20 @@ package body Libadalang.Sources is
          end;
       end if;
 
+      --  Set fractional part if radix point is present
+      if Radix_Point /= No_Index then
+         Result.Fraction := (Radix_Point + 1,
+                             Result.Numeral.Last);
+         Result.Numeral.Last := Radix_Point - 1;
+
+         --  Make sure the fractional part isn't empty
+         if Is_Empty (Result.Fraction) then
+            Error;
+         end if;
+      else
+         Result.Fraction := (1, 0);
+      end if;
+
       --  Make sure the numeral only uses digits allowed by the base
       declare
 
@@ -590,6 +626,11 @@ package body Libadalang.Sources is
       Parsed : constant Parsed_Numeric_Literal :=
          Parse_Numeric_Literal (Text);
    begin
+      --  Ensure that the literal doesn't contain a fractional part
+      if not Is_Empty (Parsed.Fraction) then
+         Error;
+      end if;
+
       --  Evaluate the numeral part of the literal
       declare
          Numeral : constant String := Slice (Parsed.Numeral);
@@ -606,11 +647,89 @@ package body Libadalang.Sources is
          declare
             Exponent : GNATCOLL.GMP.Integers.Big_Integer;
          begin
-            Exponent.Set (10);
+            Exponent.Set (Long (Parsed.Base));
             Exponent.Raise_To_N (Unsigned_Long (Parsed.Exponent));
             Result.Multiply (Exponent);
          end;
       end if;
    end Decode_Integer_Literal;
+
+   -------------------------
+   -- Decode_Real_Literal --
+   -------------------------
+
+   procedure Decode_Real_Literal
+     (Text   : Text_Type;
+      Result : out GNATCOLL.GMP.Rational_Numbers.Rational)
+   is
+      use GNATCOLL.GMP;
+      use GNATCOLL.GMP.Integers;
+      use GNATCOLL.GMP.Rational_Numbers;
+
+      function Slice (SS : String_Slice) return String is
+        (Strip_Underscores (Text (SS.First .. SS.Last)));
+
+      Parsed : constant Parsed_Numeric_Literal :=
+        Parse_Numeric_Literal (Text);
+
+      Denominator, Exponent_BI : Big_Integer;
+      Exponent_R               : Rational;
+   begin
+      --  Evaluate the numeral parts of the literal
+      declare
+         --  A real literal is of the following form:
+         --
+         --    numeral.numeral [exponent]
+         --
+         --  The Parsed record represents this literal, Parsed.Numeral
+         --  represents the integer part of the real while Parsed.Fraction
+         --  represents its fractional part. Parsed.Exponent is set to 0 if no
+         --  exponent is given.
+         Numeral  : constant String := Slice (Parsed.Numeral);
+         Fraction : constant String := Slice (Parsed.Fraction);
+      begin
+
+         --  Ensure there is a fractional part
+         if Fraction'Length = 0 then
+            Error;
+         end if;
+
+         --  Turn a fractional number of the form III.FFF to a real fraction
+
+         --  First, eliminate the radix point by moving it to the right in
+         --  order to have an integer of the form IIIFFF (just concat the
+         --  Numeral and Fraction Strings here).
+         Result.Set (Numeral & Fraction, Int (Parsed.Base));
+
+         --  Build the denominator, which is the base raised to the number of
+         --  right-shifts we had to do to get rid of the fractional point (the
+         --  length of Fractional here).
+         Denominator.Set (Long (Parsed.Base));
+         Denominator.Raise_To_N (Unsigned_Long (Fraction'Length));
+
+         Result.Set_Den (Denominator);
+
+         --  Build the exponent fraction and apply it to Result
+
+         Exponent_BI.Set (Long (Parsed.Base));
+
+         --  Multiply result by exponent if positive, 1/exponent if negative
+
+         Exponent_BI.Raise_To_N (Unsigned_Long (abs Parsed.Exponent));
+         Exponent_R.Set (Exponent_BI);
+
+         if Parsed.Exponent < 0 then
+            declare
+               One : Rational;
+            begin
+               One.Set ("1");
+               Exponent_R.Set (One / Exponent_R);
+            end;
+         end if;
+
+         Result.Set (Result * Exponent_R);
+      end;
+
+   end Decode_Real_Literal;
 
 end Libadalang.Sources;

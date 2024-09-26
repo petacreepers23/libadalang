@@ -1,4 +1,6 @@
-Eval 'node.p_previous_part_for_decl()' on node <SubpBody ["Bar"] baz-qux-bar.adb:2:1-5:9>
+WARNING: File baz-qux.adb not found
+Working on node <SubpBody ["Bar"] baz-qux-bar.adb:2:1-5:9>
+==========================================================
+
+Eval 'node.p_previous_part_for_decl()'
 Result: None
-
-

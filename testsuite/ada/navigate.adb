@@ -22,7 +22,7 @@ procedure Navigate is
    package X renames GNATCOLL.Strings;
 
    type Enabled_Kinds_Type is array (LALCO.Ada_Node_Kind_Type) of Boolean;
-   All_Kinds : constant Enabled_Kinds_Type := (others => True);
+   All_Kinds : constant Enabled_Kinds_Type := [others => True];
 
    function String_To_Kinds (List : String) return Enabled_Kinds_Type;
 
@@ -30,15 +30,16 @@ procedure Navigate is
      (Context : Libadalang.Helpers.App_Job_Context; Unit : LAL.Analysis_Unit);
 
    package App is new Libadalang.Helpers.App
-     (Name         => "navigate",
-      Description  => "Navigate between AST nodes (spec/body/...).",
-      Process_Unit => Process_File);
+     (Name                   => "navigate",
+      Description            => "Navigate between AST nodes (spec/body/...).",
+      GPR_Absent_Dir_Warning => False,
+      Process_Unit           => Process_File);
 
    package Args is
       use GNATCOLL.Opt_Parse;
 
       package Kinds is new Parse_Option
-        (App.Args.Parser, "-k", "--kinds",
+        (App.Args.Parser, "-K", "--kinds",
          "Comma-separated list of AST node kind names, like"
          & " ""Ada_Subp_Body,Ada_Package_Decl"". This will filter the"
          & " nodes on which we navigate.",
@@ -204,7 +205,7 @@ procedure Navigate is
    ------------------
 
    function String_To_Kinds (List : String) return Enabled_Kinds_Type is
-      Enabled_Kinds : Enabled_Kinds_Type := (others => False);
+      Enabled_Kinds : Enabled_Kinds_Type := [others => False];
 
       Names : constant X.XString_Array := X.To_XString (List).Split (",");
    begin

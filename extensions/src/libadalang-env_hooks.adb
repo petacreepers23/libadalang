@@ -1,25 +1,7 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
@@ -43,8 +25,8 @@ package body Libadalang.Env_Hooks is
 
    Text_IO_Subpackages :
      constant array (Positive range <>) of access constant Text_Type
-       := (Integer_IO'Access, Modular_IO'Access, Float_IO'Access,
-           Fixed_IO'Access, Decimal_IO'Access, Enumeration_IO'Access);
+       := [Integer_IO'Access, Modular_IO'Access, Float_IO'Access,
+           Fixed_IO'Access, Decimal_IO'Access, Enumeration_IO'Access];
 
    --  The content of the following string literal has been generated running
    --  GNAT with flag -gnatS, and then post-processed by hand.
@@ -171,18 +153,20 @@ package body Libadalang.Env_Hooks is
      "    range -((2 ** 63 - 1) * 0.000000001) .." & ASCII.LF &
      "          +((2 ** 63 - 1) * 0.000000001);" & ASCII.LF &
      "  for Duration'Small use 0.000000001;" & ASCII.LF &
+     "  type Universal_Int_Type_ is range -1 .. 1;" & ASCII.LF &
+     "  type Universal_Real_Type_ is digits 16;" & ASCII.LF &
+     "  type Universal_Fixed_Type_ is delta 0.01 range -1.0 .. 1.0;"
+     & ASCII.LF &
+     "  package root_types_ is" & ASCII.LF &
+     "  type root_integer is range -1 .. 1;" & ASCII.LF &
+     "  type root_real is digits 16;" & ASCII.LF & ASCII.LF &
+     "  end root_types_;" & ASCII.LF &
      "  Constraint_Error : exception;" & ASCII.LF &
      "  Numeric_Error    : exception;" & ASCII.LF &
      "  Program_Error    : exception;" & ASCII.LF &
      "  Storage_Error    : exception;" & ASCII.LF &
      "  Tasking_Error    : exception;" & ASCII.LF &
-     "  type Universal_Int_Type_ is range -1 .. 1;" & ASCII.LF &
-     "  type Universal_Real_Type_ is digits 16;" & ASCII.LF &
-     "  package root_types_ is" & ASCII.LF &
-     "  type root_integer is range -1 .. 1;" & ASCII.LF &
-     "  type root_real is digits 16;" & ASCII.LF &
-     "  type root_fixed is delta 0.1 range -1.0 .. 1.0;" & ASCII.LF &
-     "  end root_types_;" & ASCII.LF &
+     "  Abort_Signal_    : exception;" & ASCII.LF &
      "end Standard;" & ASCII.LF;
 
    ---------------------
@@ -197,7 +181,7 @@ package body Libadalang.Env_Hooks is
 
       case Defining_Name_Nodes (Name.Kind) is
          when Ada_Base_Id =>
-            return (1 => Get_Symbol (Name));
+            return [Get_Symbol (Name)];
 
          when Ada_Dotted_Name =>
             return Name_To_Symbols (Name.Dotted_Name_F_Prefix)
@@ -215,7 +199,7 @@ package body Libadalang.Env_Hooks is
    function To_String (Name : Symbol_Type_Array) return Text_Type
    is
       (if Name'Length > 0
-       then Name (Name'First).all
+       then +Name (Name'First)
             & (if Name'Length > 1
                then "." & To_String (Name (Name'First + 1 .. Name'Last))
                else "")
@@ -227,60 +211,120 @@ package body Libadalang.Env_Hooks is
 
    function Fetch_Unit
      (Ctx                : Internal_Context;
-      Name               : Bare_Name;
-      Kind               : Analysis_Unit_Kind;
-      Load_If_Needed     : Boolean;
-      Do_Prepare_Nameres : Boolean := True) return Internal_Unit is
-   begin
-      return Fetch_Unit
-        (Ctx, Name_To_Symbols (Name), Name.Unit, Kind, Load_If_Needed,
-         Do_Prepare_Nameres);
-   end Fetch_Unit;
-
-   function Fetch_Unit
-     (Ctx                : Internal_Context;
       Name               : Symbol_Type_Array;
-      From_Unit          : Internal_Unit;
       Kind               : Analysis_Unit_Kind;
+      From_Unit          : Internal_Unit;
       Load_If_Needed     : Boolean;
       Do_Prepare_Nameres : Boolean := True;
       Not_Found_Is_Error : Boolean := False;
       Process_Parents    : Boolean := True) return Internal_Unit
    is
 
-      procedure Prepare_Nameres (Unit : Internal_Unit);
-      --  Prepare semantic analysis and reference Unit from the current unit
+      procedure Prepare_Nameres
+        (Unit : Internal_Unit; PLE_Root_Index : Positive);
+      --  Prepare semantic analysis for the compilation unit at
+      --  ``Unit``/``PLE_Root_Index`` and add a reference from ``From_Unit`` to
+      --  ``Unit``.
+
+      procedure Emit_Unit_Requested
+        (Unit               : Internal_Unit;
+         Not_Found_Is_Error : Boolean);
+      --  If there is an event handler, invoke its ``Unit_Requested_Callback``
+      --  event for ``Unit``. ``Not_Found_Is_Error`` is forwarded as-is to the
+      --  callback.
 
       ---------------------
       -- Prepare_Nameres --
       ---------------------
 
-      procedure Prepare_Nameres (Unit : Internal_Unit) is
+      procedure Prepare_Nameres
+        (Unit : Internal_Unit; PLE_Root_Index : Positive) is
       begin
-         if Unit.AST_Root /= null then
-            Populate_Lexical_Env (Wrap_Unit (Unit));
+         if Unit.Ast_Root /= null then
+            Populate_Lexical_Env (Wrap_Unit (Unit), PLE_Root_Index);
             Reference_Unit (From       => From_Unit,
                             Referenced => Unit);
          end if;
       end Prepare_Nameres;
 
-      UFP              : constant Internal_Unit_Provider_Access :=
-         Ctx.Unit_Provider;
-      Unit             : Internal_Unit;
-      Unit_Name        : constant Text_Type := To_String (Name);
+      -------------------------
+      -- Emit_Unit_Requested --
+      -------------------------
+
+      procedure Emit_Unit_Requested
+        (Unit               : Internal_Unit;
+         Not_Found_Is_Error : Boolean) is
+      begin
+         --  TODO??? We now handle file not found via
+         --  ``Unit_Requested_Callback``, but we don't really handle parsing
+         --  errors directly. Do we need to do something more? Or can we
+         --  consider that anything can be done in the callback anyway?
+
+         if Ctx.Event_Handler /= null then
+
+            --  TODO??? (libadalang#1028) Passing a filename as a Text_Type is
+            --  dubious. Do the best approximation we can without crashing for
+            --  non-ASCII bytes for now, but in the future we may want to
+            --  change the signature for this event.
+
+            declare
+               Filename : constant String := Get_Filename (Unit);
+               Name     : Text_Type (Filename'Range);
+            begin
+               for I in Filename'Range loop
+                  declare
+                     C : Character renames Filename (I);
+                  begin
+                     Name (I) :=
+                       (if C in Character'Val (0) .. Character'Val (127)
+                        then Wide_Wide_Character'Val (Character'Pos (C))
+                        else '?');
+                  end;
+               end loop;
+               Ctx.Event_Handler.Unit_Requested_Callback
+                 (Ctx,
+                  Name,
+                  From_Unit,
+                  Unit.Ast_Root /= null,
+                  Not_Found_Is_Error);
+            end;
+         end if;
+      end Emit_Unit_Requested;
+
+      Unit_Name      : constant Text_Type := To_String (Name);
+      Unit           : Internal_Unit;
+      PLE_Root_Index : Positive;
    begin
       --  If we must not load missing units and this one is missing, do
       --  nothing.
-      if not Load_If_Needed
-         and then not Has_Unit (Ctx, UFP.Get_Unit_Filename (Unit_Name, Kind))
-      then
-         return null;
+
+      if not Load_If_Needed then
+         declare
+            Filename : String_Access;
+         begin
+            Get_Unit_Location
+              (Context        => Ctx,
+               Name           => Unit_Name,
+               Kind           => Kind,
+               Filename       => Filename,
+               PLE_Root_Index => PLE_Root_Index);
+            if not Has_Unit (Ctx, Filename.all) then
+               return null;
+            end if;
+         end;
       end if;
 
+      --  If we are not preparing nameres, we can directly return the unit
+      --  corresponding to the entire name.
+
       if not Do_Prepare_Nameres then
-         --  If we are not preparing nameres, we can directly return the unit
-         --  corresponding to the entire name.
-         return UFP.Get_Unit (Ctx, Unit_Name, Kind);
+         Get_Unit_And_PLE_Root
+           (Context        => Ctx,
+            Name           => Unit_Name,
+            Kind           => Kind,
+            Unit           => Unit,
+            PLE_Root_Index => PLE_Root_Index);
+         return Unit;
       end if;
 
       --  GNAT kludge: as an "optimization", the generic subpackages in
@@ -288,13 +332,11 @@ package body Libadalang.Env_Hooks is
       --  Ada.Text_IO unit itself, but in private child packages. GNAT
       --  magically imports them in Ada.Text_IO's namespace.
       --
-      --  Here, try to import these child unit as soon as someone WITHes
+      --  Here, try to import these child units as soon as someone WITHes
       --  Ada.Text_IO.
 
-      if Kind = Unit_Specification and then
-        (Unit_Name = Text_IO or else
-         Unit_Name = Wide_Text_IO or else
-         Unit_Name = Wide_Wide_Text_IO)
+      if Kind = Unit_Specification
+         and then Unit_Name in Text_IO | Wide_Text_IO | Wide_Wide_Text_IO
       then
          for SP of Text_IO_Subpackages loop
             declare
@@ -302,26 +344,30 @@ package body Libadalang.Env_Hooks is
                   Lookup_Symbol (Ctx, SP.all);
                SP_FQN    : constant Symbol_Type_Array := Name & SP_Symbol;
             begin
-               Prepare_Nameres
-                 (UFP.Get_Unit (Ctx, To_String (SP_FQN), Kind));
+               Get_Unit_And_PLE_Root
+                 (Context        => Ctx,
+                  Name           => To_String (SP_FQN),
+                  Kind           => Kind,
+                  Unit           => Unit,
+                  PLE_Root_Index => PLE_Root_Index);
+               Prepare_Nameres (Unit, PLE_Root_Index);
             end;
          end loop;
       end if;
 
+      --  If we should load only the unit that ``Name`` and ``Kind`` designate,
+      --  return it now and return. Do not forget to emit the "unit requested
+      --  callback" event.
+
       if not Process_Parents then
-         Unit := UFP.Get_Unit (Ctx, To_String (Name), Kind);
-
-         if Unit.Context.Event_Handler /= null then
-            Unit.Context.Event_Handler.Unit_Requested_Callback
-              (Ctx,
-               To_Text (Get_Filename (Unit)),
-               From_Unit,
-               Unit.AST_Root /= null,
-               Not_Found_Is_Error);
-         end if;
-
-         Prepare_Nameres (Unit);
-
+         Get_Unit_And_PLE_Root
+           (Context        => Ctx,
+            Name           => Unit_Name,
+            Kind           => Kind,
+            Unit           => Unit,
+            PLE_Root_Index => PLE_Root_Index);
+         Emit_Unit_Requested (Unit, Not_Found_Is_Error);
+         Prepare_Nameres (Unit, PLE_Root_Index);
          return Unit;
       end if;
 
@@ -343,53 +389,79 @@ package body Libadalang.Env_Hooks is
          --  substituted the renaming package to the renamed entity, and
          --  incremented the index accordingly.
 
+         ----------
+         -- Step --
+         ----------
+
          procedure Step
            (Name  : Symbol_Type_Array;
             Index : Positive)
          is
-            Current_Name : constant Symbol_Type_Array :=
-               Name (Name'First .. Index);
+            Is_Last : constant Boolean := Index = Name'Last;
+            --  Whether this call to ``Step`` is the last one, i.e. the one to
+            --  fetch the unit to return.
+
+            Current_Name : constant Text_Type :=
+              To_String (Name (Name'First .. Index));
 
             I_Kind : constant Analysis_Unit_Kind :=
-              (if Index = Name'Last then Kind else Unit_Specification);
-            --  When looking for unit A.B, A is a specification even if we mean
-            --  to fetch B's body.
-
-            Is_Not_Found_Error : constant Boolean :=
-              (if Index = Name'Last then Not_Found_Is_Error else True);
+              (if Is_Last then Kind else Unit_Specification);
+            --  When looking for unit ``A.B``, ``A`` is a specification even if
+            --  we mean to fetch ``B``'s body, unless ``B`` is a subunit (in
+            --  that case ``A`` must have a body).
          begin
+            Get_Unit_And_PLE_Root
+              (Context        => Ctx,
+               Name           => Current_Name,
+               Kind           => I_Kind,
+               Unit           => Unit,
+               PLE_Root_Index => PLE_Root_Index);
 
-            --  TODO??? We now handle file not found via
-            --  Unit_Requested_Callback, but we don't really handle parsing
-            --  errors directly. Do we need to do something more ? Or can we
-            --  consider that anything can be done in the callback anyway?
+            --  If we are trying to fetch a dependency of the requested unit,
+            --  it may be a subunit: if fetching a spec did not work, try
+            --  fetching a body instead.
 
-            Unit := UFP.Get_Unit (Ctx, To_String (Current_Name), I_Kind);
+            if not Is_Last and then Unit.Ast_Root = null then
+               declare
+                  B : Internal_Unit;
+                  I : Positive;
+               begin
+                  Get_Unit_And_PLE_Root
+                    (Context        => Ctx,
+                     Name           => Current_Name,
+                     Kind           => Unit_Body,
+                     Unit           => B,
+                     PLE_Root_Index => I);
+                  Emit_Unit_Requested
+                    (Unit => B, Not_Found_Is_Error => False);
 
-            if Unit.Context.Event_Handler /= null then
-               Unit.Context.Event_Handler.Unit_Requested_Callback
-                 (Ctx,
-                  To_Text (Get_Filename (Unit)),
-                  From_Unit,
-                  Unit.AST_Root /= null,
-                  Is_Not_Found_Error);
+                  --  Consider the body for the rest of the processing iff we
+                  --  have found it, otherwise keep the spec unit in ``Unit``.
+
+                  if B.Ast_Root /= null then
+                     Unit := B;
+                     PLE_Root_Index := I;
+                  end if;
+               end;
             end if;
 
-            Prepare_Nameres (Unit);
+            --  Consider that a missing unit is an error if
+            --  ``Not_Found_Is_Error`` or if ``Unit`` is not the requested unit
+            --  (i.e. just another unit in the closure).
 
-            --  We're on the last portion of the name: return
-            if Index = Name'Last then
-               return;
-            end if;
+            Emit_Unit_Requested
+              (Unit               => Unit,
+               Not_Found_Is_Error => not Is_Last or else Not_Found_Is_Error);
 
-            --  Else, recurse
+            Prepare_Nameres (Unit, PLE_Root_Index);
+
             declare
                Internal_Name : Symbol_Type_Array_Access :=
                  Create_Symbol_Type_Array (Internal_Symbol_Type_Array (Name));
 
                Comp_Unit : constant Compilation_Unit := Wrap_Node
                  (Ada_Node_P_Compilation_Unit_With_Name
-                    (Unit.AST_Root, Unit, Internal_Name)).As_Compilation_Unit;
+                    (Unit.Ast_Root, Unit, Internal_Name)).As_Compilation_Unit;
 
                Decl : constant Basic_Decl :=
                  (if Comp_Unit.Is_Null
@@ -397,38 +469,64 @@ package body Libadalang.Env_Hooks is
                   else Comp_Unit.P_Decl);
 
             begin
-               if not Decl.Is_Null and then Decl.Kind
-                  in Libadalang.Common.Ada_Package_Renaming_Decl_Range
+               if not Decl.Is_Null
+                  and then Decl.Kind in
+                    Libadalang.Common.Ada_Package_Renaming_Decl_Range
                then
                   --  If the declaration is a package renaming, resolve the
                   --  renamed package..
+
                   declare
-                     Target : constant Basic_Decl :=
-                        Decl.As_Package_Renaming_Decl.P_Final_Renamed_Package;
-                     Resolved_Name : Symbol_Type_Array_Access
-                       := Basic_Decl_P_Fully_Qualified_Name_Array
-                          (Unwrap_Node (Target));
-                     New_Index : constant Positive :=
-                       Resolved_Name.Items'Last + 1;
+                     Target        : constant Basic_Decl :=
+                       Decl.As_Package_Renaming_Decl.P_Final_Renamed_Package;
+                     Resolved_Name : Symbol_Type_Array_Access :=
+                       Basic_Decl_P_Fully_Qualified_Name_Array
+                         (Unwrap_Node (Target));
+                     New_Index     : constant Positive :=
+                       Resolved_Name.Items'Last;
                   begin
                      --  .. and make the next call to step consider the renamed
                      --  package.
-                     Step (Symbol_Type_Array (Resolved_Name.Items)
-                           & Name (Index + 1 .. Name'Last), New_Index);
+
+                     Step
+                       (Name  => Symbol_Type_Array (Resolved_Name.Items)
+                                 & Name (Index + 1 .. Name'Last),
+                        Index => New_Index);
+
+                     --  However if that was the last part of the name, we
+                     --  still want to return the renaming unit, and not
+                     --  renamed one. In theory we could have returned before
+                     --  resolving the renaming because we already had the unit
+                     --  we wanted to return, but if we did that we would not
+                     --  have updated the `Referenced_Units` vector to include
+                     --  the fact that `From_Unit` references the renamed unit.
+
+                     if Is_Last then
+                        Unit := Unwrap_Unit (Comp_Unit.Unit);
+                     end if;
+
                      Free (Resolved_Name);
                   exception
-                     when Property_Error =>
+                     when Precondition_Failure | Property_Error =>
                         Free (Resolved_Name);
                         raise;
                   end;
                else
+                  --  We're on the last portion of the name: return
+
+                  if Is_Last then
+                     Dec_Ref (Internal_Name);
+                     return;
+                  end if;
+
                   --  Else, just resolve the next portion of the given name
+
                   Step (Name, Index + 1);
                end if;
 
-               Free (Internal_Name);
+               Dec_Ref (Internal_Name);
             exception
-               when Property_Error =>
+               when Precondition_Failure | Property_Error =>
                   Free (Internal_Name);
                   raise;
             end;
@@ -458,7 +556,7 @@ package body Libadalang.Env_Hooks is
          Rule        => Default_Grammar_Rule,
          Is_Internal => True);
    begin
-      Populate_Lexical_Env (Std);
+      Populate_Lexical_Env (Std, 1);
    end Fetch_Standard;
 
 end Libadalang.Env_Hooks;

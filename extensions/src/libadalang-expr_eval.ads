@@ -1,27 +1,11 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
+with GNATCOLL.GMP; use GNATCOLL.GMP;
 with GNATCOLL.GMP.Integers;
+with GNATCOLL.GMP.Rational_Numbers;
 
 with Libadalang.Analysis;
 
@@ -37,6 +21,10 @@ package Libadalang.Expr_Eval is
 
    subtype Big_Integer is GNATCOLL.GMP.Integers.Big_Integer;
 
+   subtype Rational is GNATCOLL.GMP.Rational_Numbers.Rational;
+
+   subtype Double is GNATCOLL.GMP.Double;
+
    type Expr_Kind is (Enum_Lit, Int, Real, String_Lit);
 
    type Eval_Result (Kind : Expr_Kind := Int) is limited record
@@ -48,9 +36,12 @@ package Libadalang.Expr_Eval is
          when Int =>
             Int_Result : Big_Integer;
          when Real =>
-            Real_Result : Long_Float;
+            Real_Result : Rational;
          when String_Lit =>
             String_Result : Unbounded_Text_Type;
+            --  First and Last are used to keep track of the String objects
+            --  bounds (this information is required to evaluate slices).
+            First, Last   : Natural;
       end case;
    end record;
    --  This data type represents the result of the evaluation of an expression

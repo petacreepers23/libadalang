@@ -40,57 +40,7 @@ procedure Main is
          when Int =>
             return "Int " & X.Int_Result.Image;
          when Real =>
-            declare
-               Img         : constant String  := X.Real_Result'Image;
-
-               --  We expect a float image matching the following pattern::
-               --
-               --     [mantissa]E[sign][exponent]
-               --
-               --  Where `mantissa` is a read number such as `1.00`, `sign` is
-               --  either `+` or `-`, and `exponent` is a two-digit integer.
-               --
-               --  The following declarations break up the image into these
-               --  various components.
-
-               pragma Assert (Img'Length > 5);
-
-               Sign          : Character renames Img (Img'First);
-               Mantissa      : String renames
-                  Img (Img'First + 1 .. Img'Last - 4);
-               Exponent_Sign : Character renames Img (Img'Last - 2);
-               Exponent      : String renames Img (Img'Last - 1 .. Img'Last);
-
-               pragma Assert (Sign in ' ' | '-');
-               pragma Assert (Exponent_Sign in '+' | '-');
-               pragma Assert (Img (Img'Last - 3) = 'E');
-
-               --  We can now decode the various parts
-
-               Exponent_Value    : constant Integer := Integer'Value (Exponent);
-               Positive_Exponent : constant Boolean := Sign = '+';
-
-               Mantissa_Sign : constant String :=
-                  (if Sign = ' ' then "" else "-");
-
-               Mantissa_Slice : String renames Mantissa
-                 (Mantissa'First
-                  .. Integer'Min (Mantissa'First + 1 + Float_Precision,
-                                  Mantissa'Last));
-               --  Take only the slice of Mantissa that we are interested in to
-               --  keep the expected precision::
-               --
-               --    * the first 2 characters of the original image (the first
-               --      digit and the dot);
-               --
-               --    * additional digits for the expected precision.
-               --
-               --  ... but don't go past the mantissa we have (Mantissa'Last).
-            begin
-               --  Rebuild the image from the mantissa slice and the exponent
-               return ("Real " & Mantissa_Sign & Mantissa_Slice
-                       & 'E' & Exponent_Sign & Exponent);
-            end;
+            return "Real " & X.Real_Result.Image;
          when Enum_Lit =>
             return "Enum_Lit " & X.Enum_Result.Image;
          when String_Lit =>
@@ -145,12 +95,14 @@ begin
       begin
          declare
             Default_Expr : constant Expr := E.As_Object_Decl.F_Default_Expr;
-            Is_Call      : constant Boolean :=
+            Is_User_Call : constant Boolean :=
                (Default_Expr.Kind = Ada_Call_Expr
-                and then Default_Expr.As_Call_Expr.P_Is_Call);
+                and then Default_Expr.As_Call_Expr.P_Is_Call
+                and then Default_Expr.As_Call_Expr.F_Name.Kind
+                   not in Ada_Attribute_Ref);
 
             Res : constant Eval_Result :=
-               (if Is_Call then Eval_Call (Default_Expr.As_Call_Expr)
+               (if Is_User_Call then Eval_Call (Default_Expr.As_Call_Expr)
                 else Expr_Eval (Default_Expr));
          begin
             Put_Line

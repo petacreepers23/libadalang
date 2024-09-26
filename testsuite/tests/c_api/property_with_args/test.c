@@ -6,20 +6,23 @@
 #include "utils.h"
 
 static void
-dump_identifier(ada_base_node id)
+dump_identifier(ada_node *id)
 {
-    ada_text kind;
-    ada_kind_name(ada_node_kind(id), &kind);
+    ada_text text;
     ada_token name;
 
+    ada_kind_name(ada_node_kind(id), &text);
     printf("  ");
-    fprint_text(stdout, kind, 0);
+    fprint_text(stdout, text, 0);
     printf(": ");
+    ada_destroy_text(&text);
 
     if (!ada_ada_node_token_start(id, &name))
       error("Could not the the name of an Identifier");
-    fprint_text(stdout, name.text, 0);
+    ada_token_range_text (&name, &name, &text);
+    fprint_text(stdout, text, 0);
     printf("\n");
+    ada_destroy_text(&text);
 }
 
 static const char *
@@ -34,13 +37,15 @@ main(void)
     ada_analysis_context ctx;
     ada_analysis_unit unit;
 
-    ada_base_entity foo, i;
-    ada_base_entity tmp;
+    ada_node foo, i;
+    ada_node tmp;
     ada_bool boolean;
 
-    ctx = ada_create_analysis_context(NULL, NULL, NULL, NULL, 1, 8);
-    if (ctx == NULL)
-        error("Could not create the analysis context");
+    ctx = ada_allocate_analysis_context ();
+    abort_on_exception ();
+
+    ada_initialize_analysis_context (ctx, NULL, NULL, NULL, NULL, 1, 8);
+    abort_on_exception ();
 
     unit = ada_get_analysis_unit_from_file(ctx, "foo.adb", NULL, 0,
                                            ada_default_grammar_rule);

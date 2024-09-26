@@ -1,25 +1,7 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Ada.Containers.Vectors;
 with Ada.Directories;
@@ -29,9 +11,12 @@ with GNATCOLL.GMP.Integers;
 
 with Langkit_Support.Adalog.Debug;
 with Langkit_Support.Bump_Ptr;
+with Langkit_Support.Symbols;
 with Langkit_Support.Text; use Langkit_Support.Text;
 
 with Libadalang.Analysis; use Libadalang.Analysis;
+with Libadalang.Common;
+with Libadalang.Config_Pragmas_Impl;
 with Libadalang.Doc_Utils;
 with Libadalang.Env_Hooks;
 with Libadalang.Expr_Eval;
@@ -44,6 +29,96 @@ with Libadalang.Unit_Files;
 package body Libadalang.Implementation.Extensions is
 
    procedure Alloc_Logic_Vars (Node : Bare_Expr) with Inline;
+
+   function CU_Subunit (CU : Bare_Compilation_Unit) return Bare_Subunit;
+   --  If CU is a subunit, return the corresponding subunit node. Return null
+   --  otherwise.
+
+   ----------------
+   -- CU_Subunit --
+   ----------------
+
+   function CU_Subunit (CU : Bare_Compilation_Unit) return Bare_Subunit is
+      B : Bare_Ada_Node;
+   begin
+      if CU = null or else CU.Kind /= Ada_Compilation_Unit then
+         return null;
+      end if;
+      B := CU.Compilation_Unit_F_Body;
+      return (if B /= null and then B.Kind = Ada_Subunit
+              then B
+              else null);
+   end CU_Subunit;
+
+   --------------------------
+   -- Ada_Node_P_Can_Reach --
+   --------------------------
+
+   function Ada_Node_P_Can_Reach
+     (Node, From_Node : Bare_Ada_Node) return Boolean
+   is
+      function Can_Reach_In_Same_Unit
+        (Node, From_Node : Bare_Ada_Node) return Boolean
+      is (From_Node = null
+          or else Node.Token_Start_Index < From_Node.Token_Start_Index);
+      --  Assuming that ``Node`` and ``From_Node`` belong to the same unit,
+      --  return whether ``From_Node`` can reach ``Node`` according to Ada's
+      --  visibility rules: consider that From_Node has visibility over Node
+      --  iff Node appears earlier in the token stream.
+      --
+      --  For convenience, assume that ``Node`` can be reached if ``From_Node``
+      --  is null.
+
+      Node_CU      : Bare_Compilation_Unit;
+      From_CU      : Bare_Compilation_Unit;
+      From_Subunit : Bare_Subunit;
+
+   begin
+      if Node = null then
+         return True;
+      end if;
+
+      Node_CU := Ple_Root (Node);
+      From_CU := Ple_Root (From_Node);
+
+      --  If Node and From_Node belong to the same unit, just check their
+      --  relative position.
+
+      if Node_CU = From_CU then
+         return Can_Reach_In_Same_Unit (Node, From_Node);
+      end if;
+
+      --  Otherwise, the only case for which From_Node *does not* have
+      --  visibility over Node is when From_Node belongs to a subunit that is
+      --  rooted in Node's unit, and the subunit stub appears before Node::
+      --
+      --    package body Foo is
+      --      procedure Bar is separate;
+      --      [Node]
+      --    end Foo;
+      --
+      --    separate (Foo)
+      --    procedure Bar is
+      --      [From_Node]
+      --    end Bar;
+      --
+      --  So first, check that From_Node belongs to a subunit.
+
+      From_Subunit := CU_Subunit (From_CU);
+      if From_Subunit = null then
+         return True;
+      end if;
+
+      --  From_CU is a subunit, so climb the subunit/stub chain up until we
+      --  find a stub in Node_CU, then apply the "same-unit" visibility rules.
+
+      declare
+         Stub : constant Bare_Body_Stub :=
+           Compilation_Unit_P_Stub_For (Node_CU, From_Subunit);
+      begin
+         return Can_Reach_In_Same_Unit (Node, Stub);
+      end;
+   end Ada_Node_P_Can_Reach;
 
    -------------------------
    -- Ada_Node_P_Get_Unit --
@@ -59,10 +134,10 @@ package body Libadalang.Implementation.Extensions is
    is
    begin
       return Env_Hooks.Fetch_Unit
-        (Node.Unit.Context,
-         Env_Hooks.Symbol_Type_Array (Name.Items),
-         Node.Unit,
-         Kind,
+        (Ctx                => Node.Unit.Context,
+         Name               => Env_Hooks.Symbol_Type_Array (Name.Items),
+         Kind               => Kind,
+         From_Unit          => Node.Unit,
          Load_If_Needed     => Load_If_Needed,
          Not_Found_Is_Error => Not_Found_Is_Error,
          Process_Parents    => Process_Parents);
@@ -82,6 +157,32 @@ package body Libadalang.Implementation.Extensions is
          Reparse     => False,
          Rule        => Default_Grammar_Rule);
    end Ada_Node_P_Standard_Unit;
+
+   ---------------------------
+   -- Ada_Node_P_Is_Keyword --
+   ---------------------------
+
+   function Ada_Node_P_Is_Keyword
+     (Node             : Bare_Ada_Node;
+      Token            : Token_Reference;
+      Language_Version : Symbol_Type) return Boolean
+   is
+      pragma Unreferenced (Node);
+
+      Version_Text : constant String :=
+        Langkit_Support.Symbols.Image (Language_Version);
+
+      Version : Common.Language_Version;
+   begin
+      begin
+         Version := Common.Language_Version'Value (Version_Text);
+      exception
+         when Constraint_Error =>
+            raise Precondition_Failure
+              with "Unknown Ada version " & Version_Text;
+      end;
+      return Is_Keyword (Token, Version);
+   end Ada_Node_P_Is_Keyword;
 
    --------------------------------------
    -- Ada_Node_P_Filter_Is_Imported_By --
@@ -108,16 +209,16 @@ package body Libadalang.Implementation.Extensions is
       Context : constant Internal_Context := Node.Unit.Context;
 
       Ada_Text_IO_Symbol_Array : constant Internal_Symbol_Type_Array :=
-        (1 => Lookup_Symbol (Context, "ada"),
-         2 => Lookup_Symbol (Context, "text_io"));
+        [1 => Lookup_Symbol (Context, "ada"),
+         2 => Lookup_Symbol (Context, "text_io")];
 
       Ada_Text_IO_Special_Packages : constant Internal_Symbol_Type_Array :=
-        (Lookup_Symbol (Context, "integer_io"),
+        [Lookup_Symbol (Context, "integer_io"),
          Lookup_Symbol (Context, "modular_io"),
          Lookup_Symbol (Context, "float_io"),
          Lookup_Symbol (Context, "fixed_io"),
          Lookup_Symbol (Context, "decimal_io"),
-         Lookup_Symbol (Context, "enumeration_io"));
+         Lookup_Symbol (Context, "enumeration_io")];
 
       function Is_Special_Unit_Name
         (Symbols : Internal_Symbol_Type_Array) return Boolean;
@@ -181,9 +282,13 @@ package body Libadalang.Implementation.Extensions is
                Dec_Ref (Qualified_Name);
                if Is_Special then
                   return Env_Hooks.Fetch_Unit
-                    (Context,
-                     Env_Hooks.Symbol_Type_Array (Ada_Text_IO_Symbol_Array),
-                     Node.Unit, Unit_Specification, True, False);
+                    (Ctx                => Context,
+                     Name               =>
+                       Env_Hooks.Symbol_Type_Array (Ada_Text_IO_Symbol_Array),
+                     Kind               => Unit_Specification,
+                     From_Unit          => Node.Unit,
+                     Load_If_Needed     => True,
+                     Do_Prepare_Nameres => False);
                end if;
             end;
          end if;
@@ -198,12 +303,12 @@ package body Libadalang.Implementation.Extensions is
         (Root : Bare_Ada_Node) return CU_Array is
       begin
          if Root = null then
-            return (1 .. 0 => <>);
+            return [1 .. 0 => <>];
          end if;
 
          case Unit_Files.Root_Nodes (Root.Kind) is
             when Ada_Compilation_Unit =>
-               return (1 => Bare_Compilation_Unit (Root));
+               return [Bare_Compilation_Unit (Root)];
             when Ada_Compilation_Unit_List =>
                declare
                   List : constant Bare_Compilation_Unit_List :=
@@ -217,7 +322,7 @@ package body Libadalang.Implementation.Extensions is
                   return Res;
                end;
             when Ada_Pragma_Node_List =>
-               return (1 .. 0 => <>);
+               return [1 .. 0 => <>];
          end case;
       end All_Compilation_Units_From;
 
@@ -335,16 +440,22 @@ package body Libadalang.Implementation.Extensions is
             return "None";
          end if;
 
-         case Env_Hooks.Defining_Name_Nodes (Node.Kind) is
+         case Node.Kind is
             when Ada_Base_Id =>
                return Text (Node);
+
+            when Ada_Synthetic_Identifier =>
+               return Image (Node.Synthetic_Identifier_Sym);
 
             when Ada_Dotted_Name =>
                return (Name_Image (Node.Dotted_Name_F_Prefix)
                        & "." & Name_Image (Node.Dotted_Name_F_Suffix));
 
-            when Ada_Defining_Name =>
+            when Ada_Defining_Name_Range =>
                return Name_Image (Node.Defining_Name_F_Name);
+
+            when others =>
+               raise Constraint_Error with "Unexpected node kind";
          end case;
       end Name_Image;
 
@@ -373,6 +484,30 @@ package body Libadalang.Implementation.Extensions is
 
       return To_Wide_Wide_String (Ret);
    end Basic_Decl_Short_Image;
+
+   -------------------------------
+   -- Defining_Name_Short_Image --
+   -------------------------------
+
+   function Defining_Name_Short_Image
+     (Node : Bare_Defining_Name) return Text_Type
+   is
+      F_Name     : constant Bare_Name := Node.Defining_Name_F_Name;
+      Name_Image : constant Text_Type :=
+        (if F_Name.Kind = Ada_Synthetic_Identifier
+         then +F_Name.Synthetic_Identifier_Sym
+         else Text (Node));
+      Name_Part  : constant Text_Type :=
+        (if Name_Image = ""
+         then " ??? "
+         else " """ & Name_Image & """ ");
+   begin
+      return
+        "<" & To_Text (Kind_Name (Node))
+        & Name_Part
+        & To_Text (Ada.Directories.Simple_Name (Get_Filename (Unit (Node))))
+        & ":" & To_Text (Image (Sloc_Range (Node))) & ">";
+   end Defining_Name_Short_Image;
 
    ----------------------
    -- Basic_Decl_P_Doc --
@@ -440,10 +575,154 @@ package body Libadalang.Implementation.Extensions is
    begin
       if Node.Compilation_Unit_No_Env = Empty_Env then
          Node.Compilation_Unit_No_Env :=
-            Create_Static_Lexical_Env (Empty_Env, Node);
+            Create_Static_Lexical_Env
+              (Empty_Env, Node, Node.Unit.Context.Symbols);
       end if;
       return Node.Compilation_Unit_No_Env;
    end Compilation_Unit_P_Get_Empty_Env;
+
+   ----------------------------------------
+   -- Compilation_Unit_P_External_Config_Pragmas --
+   ----------------------------------------
+
+   function Compilation_Unit_P_External_Config_Pragmas
+     (Node : Bare_Compilation_Unit) return Bare_Pragma_Node_Array_Access
+   is
+
+      function Fetch
+        (Pragmas_Unit : Config_Pragmas_Impl.Internal_Unit)
+         return Bare_Pragma_Node_List;
+      --  Return the ``Pragma.list`` node that is the root of the
+      --  ``Pragmas_Unit`` analysis unit, or null if there is no root node or
+      --  if it is not a list of pragmas.
+
+      procedure Append
+        (Result  : in out Bare_Pragma_Node_Array_Record;
+         Next    : in out Positive;
+         Pragmas : Bare_Pragma_Node_List);
+      --  Append all pragmas from ``Pragmas`` to ``Result`` starting at index
+      --  ``Next``. Increment ``Next`` accordingly.
+
+      -----------
+      -- Fetch --
+      -----------
+
+      function Fetch
+        (Pragmas_Unit : Config_Pragmas_Impl.Internal_Unit)
+         return Bare_Pragma_Node_List
+      is
+         U : constant Internal_Unit := Internal_Unit (Pragmas_Unit);
+      begin
+         return
+           (if U = null
+               or else U.Ast_Root = null
+               or else U.Ast_Root.Kind /= Ada_Pragma_Node_List
+            then null
+            else U.Ast_Root);
+      end Fetch;
+
+      ------------
+      -- Append --
+      ------------
+
+      procedure Append
+        (Result  : in out Bare_Pragma_Node_Array_Record;
+         Next    : in out Positive;
+         Pragmas : Bare_Pragma_Node_List) is
+      begin
+         if Pragmas = null then
+            return;
+         end if;
+
+         for I in 1 .. Pragmas.Count loop
+            Result.Items (Next) := Pragmas.Nodes (I);
+            Next := Next + 1;
+         end loop;
+      end Append;
+
+      use Config_Pragmas_Impl.Unit_Maps;
+
+      U   : constant Internal_Unit := Node.Unit;
+      Ctx : constant Internal_Context := U.Context;
+
+   begin
+      --  Fetch the global and local list of configuration pragmas (if any)
+
+      declare
+         Cur : constant Cursor := Ctx.Config_Pragmas.Local_Pragmas.Find
+           (Config_Pragmas_Impl.Internal_Unit (U));
+
+         Local  : constant Bare_Pragma_Node_List :=
+           (if Has_Element (Cur)
+            then Fetch (Element (Cur))
+            else null);
+         Global : constant Bare_Pragma_Node_List :=
+           Fetch (Ctx.Config_Pragmas.Global_Pragmas);
+
+         --  Now that we know how many pragmas are out there, allocate the
+         --  result.
+
+         Length : constant Natural :=
+           (if Local = null then 0 else Local.Count)
+           + (if Global = null then 0 else Global.Count);
+         Next   : Positive := 1;
+      begin
+         return Result : constant Bare_Pragma_Node_Array_Access :=
+           Create_Bare_Pragma_Node_Array (Length)
+         do
+            Append (Result.all, Next, Local);
+            Append (Result.all, Next, Global);
+         end return;
+      end;
+   end Compilation_Unit_P_External_Config_Pragmas;
+
+   --------------------------------------
+   -- Compilation_Unit_P_Stub_For_Impl --
+   --------------------------------------
+
+   function Compilation_Unit_P_Stub_For_Impl
+     (Node : Bare_Compilation_Unit; Su : Bare_Subunit) return Bare_Body_Stub
+   is
+      CU      : Bare_Compilation_Unit := Ple_Root (Su);
+      Subunit : Bare_Subunit := Su;
+      --  Subunit that is currently inspected and its compilation unit
+
+      Parent_CU : Bare_Compilation_Unit;
+      --  Temporary to hold the parent compilation unit during one iteration
+   begin
+      loop
+         --  Inspect the parent unit for CU/Subunit. If we cannot find it, the
+         --  codebase is incomplete/invalid, so just return it could not be
+         --  found.
+
+         Parent_CU := Subunit_P_Root_Unit (Subunit).Node;
+         if Parent_CU = null then
+            return null;
+
+         --  If the stub for CU/Subunit is supposed to belong to the same
+         --  compilation unit as Node, fetch it and return it.
+
+         elsif Parent_CU = Node then
+            declare
+               SU : constant Bare_Subunit := CU.Compilation_Unit_F_Body;
+            begin
+               return
+                 (if SU = null
+                  then null
+                  else Subunit_P_Stub (SU));
+            end;
+         end if;
+
+         --  No luck with Parent_CU: if it is a subunit itself, continue the
+         --  search with its own parent unit.
+
+         CU := Parent_CU;
+         Subunit := CU_Subunit (CU);
+         if Subunit = null then
+            return null;
+         end if;
+      end loop;
+   end Compilation_Unit_P_Stub_For_Impl;
 
    ----------------------
    -- Expr_Eval_In_Env --
@@ -548,12 +827,12 @@ package body Libadalang.Implementation.Extensions is
          declare
             LV_Number : constant Positive :=
               (case Node.Kind is
-                  when Ada_Single_Tok_Node => 3,
-                  when others              => 1);
+                  when Ada_Single_Tok_Node => 4,
+                  when others              => 2);
 
             Arr : constant Alloc_Logic_Var_Array.Element_Array_Access
               := Alloc_Logic_Var_Array.Alloc
-                (Node.Unit.AST_Mem_Pool, LV_Number);
+                (Node.Unit.Ast_Mem_Pool, LV_Number);
          begin
             for I in 1 .. LV_Number loop
                Arr (I) := Null_Var_Record;
@@ -576,7 +855,7 @@ package body Libadalang.Implementation.Extensions is
 
       return Ret : constant Logic_Var := Logic_Var'
         (Alloc_Logic_Var_Array.To_Pointer
-           (Node.Expr_Logic_Vars) (2)'Unrestricted_Access)
+           (Node.Expr_Logic_Vars) (3)'Unrestricted_Access)
       do
          if Langkit_Support.Adalog.Debug.Debug
             and then Ret.Dbg_Name = null
@@ -600,7 +879,7 @@ package body Libadalang.Implementation.Extensions is
 
       return Ret : constant Logic_Var := Logic_Var'
         (Alloc_Logic_Var_Array.To_Pointer
-           (Node.Expr_Logic_Vars) (3)'Unrestricted_Access)
+           (Node.Expr_Logic_Vars) (4)'Unrestricted_Access)
       do
          if Langkit_Support.Adalog.Debug.Debug
             and then Ret.Dbg_Name = null
@@ -635,62 +914,258 @@ package body Libadalang.Implementation.Extensions is
       end return;
    end Expr_P_Type_Var;
 
+   ------------------------------
+   -- Expr_P_Expected_Type_Var --
+   ------------------------------
+
+   function Expr_P_Expected_Type_Var (Node : Bare_Expr) return Logic_Var
+   is
+   begin
+      Alloc_Logic_Vars (Node);
+
+      return Ret : constant Logic_Var := Logic_Var'
+        (Alloc_Logic_Var_Array.To_Pointer
+           (Node.Expr_Logic_Vars) (2)'Unrestricted_Access)
+      do
+         if Langkit_Support.Adalog.Debug.Debug
+            and then Ret.Dbg_Name = null
+         then
+            Ret.Dbg_Name := New_Unit_String
+              (Node.Unit,
+               Image (Short_Text_Image (Node)) & "." & "P_Expected_Type_Var");
+         end if;
+      end return;
+   end Expr_P_Expected_Type_Var;
+
    ----------------------------------
    -- Ada_Node_P_Resolve_Own_Names --
    ----------------------------------
 
    function Ada_Node_P_Resolve_Own_Names
-     (Node   : Bare_Ada_Node;
-      Env    : Lexical_Env;
-      Origin : Bare_Ada_Node;
-      E_Info : Internal_Entity_Info := No_Entity_Info) return Boolean
+     (Node                 : Bare_Ada_Node;
+      Generate_Diagnostics : Boolean;
+      Env                  : Lexical_Env;
+      Origin               : Bare_Ada_Node;
+      Entry_Point          : Bare_Ada_Node;
+      E_Info               : Internal_Entity_Info := No_Entity_Info)
+      return Boolean
    is
       use Nameres_Maps;
+      use Libadalang.Implementation.Solver;
 
-      R : Relation;
-      C : constant Cursor := Node.Unit.Nodes_Nameres.Find (Node);
+      Cache : Nameres_Maps.Map renames Node.Unit.Nodes_Nameres;
+      C     : constant Cursor := Cache.Find (Node);
    begin
-      --  There was already resolution for this node, and it's the same
-      --  rebindings, and the cache key is still fresh: just return
-      --  existing result.
+      --  If we already resolved this node with the same rebindings and if the
+      --  cache is still fresh, return the memoized result.
 
-      if Nameres_Maps.Has_Element (C)
-        and then Element (C).Cache_Version >= Node.Unit.Context.Cache_Version
-        and then Nameres_Maps.Element (C).Rebindings = E_Info.Rebindings
-      then
+      if Has_Element (C) then
          declare
-            Res_Val : constant Resolution_Val := Nameres_Maps.Element (C);
+            use type Ada.Exceptions.Exception_Id;
+            Cached : Resolution_Val renames Cache.Reference (C);
          begin
-            if Res_Val.Raised_Exc then
-               raise Property_Error with "Memoized Error";
+            if Cached.Cache_Version >= Node.Unit.Context.Cache_Version
+               and then Cached.Rebindings = E_Info.Rebindings
+               and then (not Generate_Diagnostics
+                         or else Cached.Has_Diagnostics)
+            then
+               if Cached.Exc_Id = Ada.Exceptions.Null_Id then
+                  return Cached.Return_Value.Success;
+               else
+                  Reraise_Memoized_Error (Cached.Exc_Id, Cached.Exc_Msg);
+               end if;
             end if;
 
-            return Nameres_Maps.Element (C).Return_Value;
+            --  This cache entry will be replaced in the next code section no
+            --  matter what, so decrease reference count here while we still
+            --  have a reference to the cached value.
+            Dec_Ref (Cached.Return_Value);
          end;
       end if;
 
-      R := Dispatcher_Ada_Node_P_Xref_Equation (Node, Env, Origin, E_Info);
+      --  Past this point, we know we cannot rely on the cache: perform the
+      --  resolution and memoize the result or the exception.
 
-      --  There was no resolution, or if there was it was for different
-      --  rebindings. In that case, solve and include the result in the
-      --  mmz map.
-      return Res : constant Boolean := Solve_Wrapper (R,  Node) do
-         Dec_Ref (R);
-         Node.Unit.Nodes_Nameres.Include
-           (Node,
-            (Node.Unit.Context.Cache_Version, E_Info.Rebindings, Res, False));
-      end return;
+      declare
+         R : Relation;
+         V : Resolution_Val :=
+           (Cache_Version   => Node.Unit.Context.Cache_Version,
+            Rebindings      => E_Info.Rebindings,
+            Has_Diagnostics => Generate_Diagnostics,
+            Return_Value    => (False, null),
+            Exc_Id          => Ada.Exceptions.Null_Id,
+            Exc_Msg         => null);
+      begin
+         R := Dispatcher_Ada_Node_P_Xref_Equation
+           (Node, Env, Origin, Entry_Point, E_Info);
 
-   exception
-      when Property_Error =>
+         if Generate_Diagnostics then
+            V.Return_Value := Solve_With_Diagnostics (R, Node);
+         else
+            V.Return_Value.Success := Solve_Wrapper (R, Node);
+            V.Return_Value.Diagnostics :=
+              Create_Internal_Solver_Diagnostic_Array (0);
+         end if;
          Dec_Ref (R);
-         --  Memoize the exception result, to be able to re-raise a
-         --  property_error if this is called again with the same params.
-         Node.Unit.Nodes_Nameres.Include
-           (Node,
-            (Node.Unit.Context.Cache_Version,
-             E_Info.Rebindings, False, Raised_Exc => True));
-         raise;
+
+         Cache.Include (Node, V);
+         return V.Return_Value.Success;
+      exception
+         when Exc : others =>
+            if Properties_May_Raise (Exc) then
+               Dec_Ref (R);
+               Store_Memoized_Error (Exc, V.Exc_Id, V.Exc_Msg);
+               Cache.Include (Node, V);
+            end if;
+            raise;
+      end;
    end Ada_Node_P_Resolve_Own_Names;
+
+   ----------------------------------------
+   -- Ada_Node_P_Own_Nameres_Diagnostics --
+   ----------------------------------------
+
+   function Ada_Node_P_Own_Nameres_Diagnostics
+     (Node                 : Bare_Ada_Node;
+      E_Info               : Internal_Entity_Info := No_Entity_Info)
+      return Internal_Solver_Diagnostic_Array_Access
+   is
+      use Nameres_Maps;
+
+      Cache : Nameres_Maps.Map renames Node.Unit.Nodes_Nameres;
+      C     : constant Cursor := Cache.Find (Node);
+   begin
+      if Has_Element (C) then
+         declare
+            use type Ada.Exceptions.Exception_Id;
+            Cached : Resolution_Val renames Cache.Reference (C);
+         begin
+            if Cached.Cache_Version >= Node.Unit.Context.Cache_Version
+               and then Cached.Rebindings = E_Info.Rebindings
+               and then Cached.Has_Diagnostics
+            then
+               if Cached.Exc_Id = Ada.Exceptions.Null_Id then
+                  Inc_Ref (Cached.Return_Value.Diagnostics);
+                  return Cached.Return_Value.Diagnostics;
+               else
+                  Reraise_Memoized_Error (Cached.Exc_Id, Cached.Exc_Msg);
+               end if;
+            end if;
+         end;
+      end if;
+
+      return Create_Internal_Solver_Diagnostic_Array (0);
+   end Ada_Node_P_Own_Nameres_Diagnostics;
+
+   -------------------------------
+   -- Should_Collect_Env_Caches --
+   -------------------------------
+
+   function Should_Collect_Env_Caches
+     (Ctx                        : Internal_Context;
+      Unit                       : Internal_Unit;
+      All_Env_Caches_Entry_Count : Long_Long_Natural) return Boolean
+   is
+      Ctx_Stats  : Context_Env_Caches_Stats renames Ctx.Env_Caches_Stats;
+      Unit_Stats : Unit_Env_Caches_Stats renames Unit.Env_Caches_Stats;
+   begin
+      --  We only consider units which hold a minimal amount of cache
+      --  entries, to avoid wasting cycles collecting the same seldom-
+      --  used units which don't take much memory.
+      if Unit_Stats.Entry_Count < 100 then
+         return False;
+      end if;
+
+      declare
+         Hit_Ratio : constant Float :=
+           (if Unit_Stats.Lookup_Count = 0 then 1.0
+            else Float (Unit_Stats.Hit_Count)
+                 / Float (Unit_Stats.Lookup_Count));
+         --  Ratio of cache hits over total cache lookups since this unit was
+         --  last collected.
+
+         Lookup_Ratio : constant Float :=
+           Float (Unit_Stats.Lookup_Count)
+           / Float (Ctx_Stats.Lookup_Count
+                    - Unit_Stats.Last_Overall_Lookup_Count);
+         --  Ratio of lookups done on this unit over total lookups done on any
+         --  unit since this unit was last collected.
+
+         Recent_Lookup_Ratio : constant Float :=
+           Float (Unit_Stats.Lookup_Count
+                  - Unit_Stats.Previous_Lookup_Count)
+           / Float (Ctx_Stats.Lookup_Count
+                    - Ctx_Stats.Previous_Lookup_Count);
+         --  Ratio of lookups done on this unit over total lookups done on any
+         --  unit since last time a collection was *attempted*.
+
+         Entry_Ratio : constant Float :=
+           Float (Unit_Stats.Entry_Count)
+           / Float (All_Env_Caches_Entry_Count);
+         --  Ratio of cache entries stored in this unit over total number of
+         --  cache entries spread across all units.
+
+         Usefulness_Score : constant Float :=
+           Lookup_Ratio * Hit_Ratio * (2.0 + 5.0 * Recent_Lookup_Ratio);
+         --  Score to estimate how useful the cache entries in this unit are:
+         --  0 means that the cache entries are useless (we want to get rid of
+         --  them), and a score greater than Entry_Ratio implies that we want
+         --  to keep caches entries.
+         --
+         --  How to compute this score was deduced from trial and error, here
+         --  is how it is supposed to work:
+         --
+         --  * 0 means that this cache is useless because we haven't looked up
+         --    any of its entries. This is why Lookup_Ratio should be a
+         --    multiplicative factor for the overall expression.
+         --
+         --  * If Hit_Ratio is 0, this cache is useless because even if we
+         --    looked up its entries, we never found a relevant one. So
+         --    Hit_Ratio must be a multiplicative factor as well.
+         --
+         --  * We should favor units whose caches were used recently, even if
+         --    their lookup ratios are lower than that of another unit.
+
+         Result : constant Boolean := Usefulness_Score < Entry_Ratio;
+         --  We want to collect this unit if the usefulness of its cache
+         --  entries is lower than the proportion of total memory space needed
+         --  to store them.
+      begin
+         if Cache_Invalidation_Trace.Is_Active then
+            if Result then
+               Cache_Invalidation_Trace.Trace
+                 ("Collecting " & Trace_Image (Unit));
+            else
+               Cache_Invalidation_Trace.Trace
+                 ("Leaving alone " & Trace_Image (Unit));
+            end if;
+
+            Cache_Invalidation_Trace.Increase_Indent;
+            Cache_Invalidation_Trace.Trace
+              ("Cache entries:" & Unit_Stats.Entry_Count'Image);
+            Cache_Invalidation_Trace.Trace
+              ("Cache lookup count:" & Unit_Stats.Lookup_Count'Image);
+            Cache_Invalidation_Trace.Trace
+              ("Cache hit count:" & Unit_Stats.Hit_Count'Image);
+            Cache_Invalidation_Trace.Trace
+              ("Ratio of cache hits:"
+               & Float'Image (100.0 * Hit_Ratio));
+            Cache_Invalidation_Trace.Trace
+              ("Ratio of total cache lookups:"
+               & Float'Image (100.0 * Lookup_Ratio));
+            Cache_Invalidation_Trace.Trace
+              ("Ratio of recent cache lookups:"
+               & Float'Image (100.0 * Recent_Lookup_Ratio));
+            Cache_Invalidation_Trace.Trace
+              ("Cache usefulness:"
+               & Float'Image (100.0 * Usefulness_Score));
+            Cache_Invalidation_Trace.Trace
+              ("Ratio of entries:"
+               & Float'Image (100.0 * Entry_Ratio));
+            Cache_Invalidation_Trace.Decrease_Indent;
+         end if;
+         return Result;
+      end;
+   end Should_Collect_Env_Caches;
 
 end Libadalang.Implementation.Extensions;

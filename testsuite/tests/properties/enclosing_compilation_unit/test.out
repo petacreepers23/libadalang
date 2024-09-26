@@ -1,0 +1,20 @@
+Working on node <GenericPackageInstantiation ["My_Pkg"] main.adb:6:4-6:31>
+==========================================================================
+
+Set 'cu' to 'node.p_designated_generic_decl.p_enclosing_compilation_unit'
+Result: <| CompilationUnit test.ads:1:1-4:10 [main.adb:6:4] |>
+
+Eval 'cu.p_generic_instantiations'
+Result: [<GenericPackageInstantiation ["My_Pkg"] main.adb:6:4-6:31>]
+
+Working on node <NullStmt main.adb:10:4-10:9>
+=============================================
+
+Eval 'node.p_enclosing_compilation_unit'
+Result: <CompilationUnit main.adb:1:1-12:10>
+
+Working on node <AssignStmt test.adb:5:7-5:14>
+==============================================
+
+Eval 'node.p_enclosing_compilation_unit'
+Result: <CompilationUnit test.adb:1:1-8:10>

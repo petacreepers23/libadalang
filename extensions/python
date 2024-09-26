@@ -8,6 +8,52 @@ def token_match(self, other):
     return self == other or self.text == other
 
 
+def _coerce_bytes(label, value, what='a bytes string', or_none=False):
+    """
+    Take bytes (forwarded as-is to C) but also accept text (encoded using
+    the system encoding).
+    """
+    if value is None and or_none:
+        return None
+    elif isinstance(value, bytes):
+        return value
+    elif isinstance(value, str):
+        return value.encode()
+    else:
+        raise TypeError('`{}` argument must be {} (got {})'
+                        .format(label, what, _type_fullname(type(value))))
+
+
+_set_config_pragmas_mapping = _import_func(
+    "ada_set_config_pragmas_mapping",
+    [AnalysisContext._c_type,
+     AnalysisUnit._c_type,
+     ctypes.POINTER(AnalysisUnit._c_type)],
+    None
+)
+
+
+## Handling of string arrays
+
+class _c_string_array(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_int),
+        ("c_ptr", ctypes.POINTER(ctypes.c_char_p)),
+        # Omit the "items" field: it has variable size and is not necessary
+        # to just read the items.
+    ]
+
+    @property
+    def wrap(self) -> List[str]:
+        return [self.c_ptr[i] for i in range(self.length)]
+
+_c_string_array_ptr = ctypes.POINTER(_c_string_array)
+
+_c_free_string_array = _import_func(
+    "ada_free_string_array", [_c_string_array_ptr], None,
+)
+
+
 @property
 def doc_name(n):
     """
@@ -61,79 +107,326 @@ class SourceFilesMode(enum.Enum):
     whole_project_with_runtime = 3
 
 
-class SourceFiles:
+class GPRProject:
+    """
+    Load a GPR project file.
+    """
 
-    class _c_struct(ctypes.Structure):
-        _fields_ = [
-            ("length", ctypes.c_int),
-            ("c_ptr", ctypes.POINTER(ctypes.c_char_p)),
-            # Omit the "items" field: it has variable size and is not necessary
-            # to just read the items.
-        ]
+    class _UnitProvider(UnitProvider):
+        def __init__(self, project: GPRProject, c_value: Any):
+            super().__init__(c_value)
 
-    _c_type = ctypes.POINTER(_c_struct)
+            # Keep a reference on the GPRProject instance that was used to
+            # create this unit provider so that the project lives at least as
+            # long as the unit provider.
+            self._project = project
 
-    _c_project_source_files = _import_func(
-        "ada_project_source_files",
-        [ctypes.c_char_p,
-         ctypes.POINTER(_project_scenario_variable),
-         ctypes.c_char_p,
-         ctypes.c_char_p,
-         ctypes.c_int],
-        _c_type,
-    )
+    def __init__(self,
+                 project_file: str,
+                 scenario_vars: Dict[str, str] = {},
+                 target: Opt[str] = None,
+                 runtime: Opt[str] = None,
+                 config_file: Opt[str] = None,
+                 ada_only: bool = False,
+                 print_errors: bool = True):
+        """
+        Load a GPR project file.
 
-    _c_free_source_file_array = _import_func(
-        "ada_free_source_file_array", [_c_type], None
-    )
+        This may raise an ``InvalidProjectError`` exception if an error occurs
+        when loading the project.
 
-    @classmethod
-    def for_project(
-        cls,
-        project_file: str,
-        scenario_vars: Dict[str, str] = {},
-        target: Opt[str] = None,
-        runtime: Opt[str] = None,
-        mode: SourceFilesMode = SourceFilesMode.default
-    ) -> List[str]:
-        ${py_doc('libadalang.source_files_for_project', 8)}
+        :param project_file: Filename for the project to load.
+        :param screnario_vars: External variables for the project to load.
+        :param target: Name of the target for the project to load. Assume the
+            native platform if left to None.
+        :param runtime: Name of the runtime for the project to load. Use the
+            default runtime for the selected target if left to None.
+        :param config_file: Name of the GPR configuration file for the project
+            to load. Use autoconfiguration if left to None.
+        :param ada_only: Whether to restrict GPR file loading to the Ada
+            language.
+        :param print_errors: Whether to print non-critical error messages
+            emitted during project loading on the standard error stream. See
+            the ``errors`` method to have programmatic access to the list of
+            errors.
+        """
+        # First, define this attribute so that __del__ work even if the
+        # constructor aborts later on because of an exception.
+        self._c_value = None
 
         # Turn arguments into C API values
-        c_project_file = UnitProvider._coerce_bytes(
-            'project_file', project_file
-        )
-        c_target = UnitProvider._coerce_bytes('target', target, or_none=True)
-        c_runtime = UnitProvider._coerce_bytes(
-            'runtime', runtime, or_none=True
-        )
+        c_project_file = _coerce_bytes('project_file', project_file)
+        c_target = _coerce_bytes('target', target, or_none=True)
+        c_runtime = _coerce_bytes('runtime', runtime, or_none=True)
+        c_config_file = _coerce_bytes('config_file', config_file, or_none=True)
 
         if scenario_vars:
             items = scenario_vars.items()
-            scn_vars_array_type = _project_scenario_variable * (len(items) + 1)
+            scn_vars_array_type = (
+                self._c_scenario_variable * (len(items) + 1)
+            )
             c_scenario_vars = scn_vars_array_type()
             for i, (name, value) in enumerate(items):
                 what = 'a dict mapping bytes strings to bytes strings'
-                name = UnitProvider._coerce_bytes('scenario_vars', name, what)
-                value = UnitProvider._coerce_bytes('scenario_vars', value,
-                                                   what)
-                c_scenario_vars[i] = _project_scenario_variable(name, value)
-            c_scenario_vars[-1] = _project_scenario_variable(None, None)
+                name = _coerce_bytes('scenario_vars', name, what)
+                value = _coerce_bytes('scenario_vars', value, what)
+                c_scenario_vars[i] = self._c_scenario_variable(
+                    name, value
+                )
+            c_scenario_vars[-1] = self._c_scenario_variable(None, None)
         else:
             c_scenario_vars = None
+
+        # Load the project
+        c_errors = _c_string_array_ptr()
+        c_project = self._c_type()
+        self._c_load(
+            c_project_file,
+            c_scenario_vars,
+            c_target,
+            c_runtime,
+            c_config_file,
+            int(ada_only),
+            ctypes.byref(c_project),
+            ctypes.byref(c_errors),
+        )
+        self._c_value = c_project
+
+        # Extract the possibly empty list of error messages and print it if
+        # requested. For user convenience, convert error messages to unicode
+        # strings and discard decoding errors.
+        self._errors = [
+            msg.decode("utf-8", "replace") for msg in c_errors.contents.wrap
+        ]
+        _c_free_string_array(c_errors)
+        if print_errors and self.errors:
+            print(f"Errors while loading {project_file}:", file=sys.stderr)
+            for e in self.errors:
+                print(e, file=sys.stderr)
+
+    def __del__(self):
+        if self._c_value is not None:
+            self._c_free(self._c_value)
+
+    @property
+    def errors(self) -> List[str]:
+        """
+        Possibly empty list of non-critical error messages emitted during
+        project loading.
+        """
+        return list(self._errors)
+
+    def create_unit_provider(self, project: Opt[str] = None) -> UnitProvider:
+        """
+        Return a unit provider that uses this GPR project.
+
+        :param project: If None, let the unit provider use the whole project
+            tree. Otherwise, restrict the unit provider to the project with the
+            given name in the project tree.
+
+            As unit providers must guarantee that there exists at most one
+            source file for each couple (unit name, unit kind), aggregate
+            projects that contains several conflicting units are not supported:
+            trying to use one will yield an ``InvalidProjectError`` exception.
+        """
+        c_project = _coerce_bytes('project', project, or_none=True)
+        c_value = self._c_create_unit_provider(self._c_value, c_project)
+        return self._UnitProvider(self, c_value)
+
+    def source_files(
+        self,
+        mode: SourceFilesMode = SourceFilesMode.default,
+        projects: List[str] = [],
+    ):
+        """
+        Return the list of source files in this project according to ``mode``:
+
+        * ``default``: sources in the root project and its non-externally built
+          dependencies;
+
+        * ``root_project``: sources in the root project only;
+
+        * ``whole_project``: sources in the whole project tree (i.e. including
+          externally built dependencies);
+
+        * ``whole_project_with_runtime``: sources in the whole project tree
+          plus runtime sources.
+
+        If ``projects`` is not empty, return instead the list for the sources
+        in all the sub-projects that ``projects`` designates, still applying
+        the given mode to the search.
+        """
 
         assert isinstance(mode, SourceFilesMode)
         c_mode = mode.value
 
+        projects_type = ctypes.c_char_p * len(projects)
+        projects_c_strings = [
+            ctypes.c_char_p(_coerce_bytes("projects", p)) for p in projects
+        ]
+        c_projects = projects_type(*projects_c_strings)
+
         # Compute the list of source files, extract it (no error expected there
         # unless we have a bug) and free the resources.
-        c_value = cls._c_project_source_files(
-            c_project_file, c_scenario_vars, c_target, c_runtime, c_mode
+        c_value = self._c_source_files(
+            self._c_value, c_mode, c_projects, len(projects)
         )
         assert c_value
-        c_data = c_value.contents
-        result = [c_data.c_ptr[i] for i in range(c_data.length)]
-        cls._c_free_source_file_array(c_value)
+        result = c_value.contents.wrap
+        _c_free_string_array(c_value)
 
         # Now convert filenames to Unicode strings using the system default
         # encoding, to be more consistent with other Python APIs.
         return [f.decode() for f in result]
+
+    def default_charset(self, project: Opt[str] = None) -> str:
+        """
+        Try to detect the default charset to use for the given project.
+
+        Restrict the detection to the subproject ``project``, or to ``self``'s
+        root project if ``project`` is left to ``None``.
+
+        Note that, as of today, this detection only looks for the ``-gnatW8``
+        compiler switch: other charsets are not supported.
+        """
+        c_project = _coerce_bytes('project', project, or_none=True)
+        result = self._c_default_charset(self._c_value, c_project)
+        return _unwrap_str(result)
+
+    def create_preprocessor(
+        self,
+        project: Opt[str] = None,
+        line_mode: Optional[FileReader.LineMode] = None,
+    ) -> FileReader:
+        """
+        Create preprocessor data from compiler arguments found in the given GPR
+        project (``-gnatep`` and ``-gnateD`` arguments), or from the
+        ``project`` sub-project (if the argument is passed).
+
+        Note that this function collects all arguments and returns an
+        approximation from them: it does not replicates exactly gprbuild's
+        behavior. This may raise a ``File_Read_Error`` exception if this fails
+        to read a preprocessor data file and a ``Syntax_Error`` exception if
+        one such file has invalid syntax.
+        """
+        c_project = _coerce_bytes('project', project, or_none=True)
+
+        if line_mode is None:
+            c_line_mode_ref = None
+        else:
+            c_line_mode = ctypes.c_int(FileReader.LineMode._unwrap(line_mode))
+            c_line_mode_ref = ctypes.byref(c_line_mode)
+
+        return FileReader(
+            self._c_create_preprocessor(
+                self._c_value, c_project, c_line_mode_ref
+            ),
+        )
+
+    def create_context(
+        self,
+        project: Opt[str] = None,
+        event_handler: Opt[EventHandler] = None,
+        with_trivia: bool = True,
+        tab_stop: int = 8,
+    ) -> AnalysisContext:
+        ${py_doc("libadalang.gpr_project_initialize_context", 8)}
+        c_project = _coerce_bytes("project", project, or_none=True)
+
+        event_handler_wrapper, c_event_handler = (
+            _EventHandlerWrapper.create(event_handler)
+        )
+
+        # Manually allocate a C-level analysis context so that we can
+        # initialize it ourselves.
+        c_value = _allocate_analysis_context()
+
+        # Create the Python wrapper, so that we have one ready for event
+        # handler callbacks triggered during context initialization.
+        result = AnalysisContext(_c_value=c_value)
+
+        # The wrapper created its own ownership share: release ours
+        _context_decref(c_value)
+
+        # Attach extra wrappers to the analysis context wrapper so that
+        # wrappers live at least as long as the analysis context.
+        #
+        # HACK: use the "_unit_provider" slot for the GPRProject instance
+        # itself. The initialization procedure will take care of creating a
+        # unit provider and make the context actually use it: there is no need
+        # for a UnitProvider wrapper here.
+        result._event_handler_wrapper = event_handler_wrapper
+        result._unit_provider = self
+
+        # Finally, initialize the analysis context. Note that this step may
+        # raise an exception: in that case, the analysis context is considered
+        # not initialized, but we are not returning "result", so it will become
+        # unreachable from the Python world, and garbage collection will take
+        # care of releasing it.
+        self._c_initialize_context(
+            self._c_value,
+            c_value,
+            c_project,
+            c_event_handler,
+            with_trivia,
+            tab_stop,
+        )
+
+        return result
+
+    _c_type = _hashable_c_pointer()
+
+    class _c_scenario_variable(ctypes.Structure):
+        _fields_ = [('name', ctypes.c_char_p),
+                    ('value', ctypes.c_char_p)]
+
+    _c_load = staticmethod(_import_func(
+        "ada_gpr_project_load",
+        [ctypes.c_char_p,
+         ctypes.POINTER(_c_scenario_variable),
+         ctypes.c_char_p,
+         ctypes.c_char_p,
+         ctypes.c_char_p,
+         ctypes.c_int,
+         ctypes.POINTER(_c_type),
+         ctypes.POINTER(_c_string_array_ptr)],
+        None,
+    ))
+
+    _c_free = staticmethod(
+        _import_func("ada_gpr_project_free", [_c_type], None)
+    )
+
+    _c_create_unit_provider = staticmethod(_import_func(
+        "ada_gpr_project_create_unit_provider",
+        [_c_type, ctypes.c_char_p],
+        _unit_provider,
+    ))
+
+    _c_source_files = staticmethod(_import_func(
+        "ada_gpr_project_source_files",
+        [_c_type, ctypes.c_int, ctypes.POINTER(ctypes.c_char_p), ctypes.c_int],
+        _c_string_array_ptr,
+    ))
+
+    _c_default_charset = staticmethod(_import_func(
+        "ada_gpr_project_default_charset",
+        [_c_type, ctypes.c_char_p], ctypes.POINTER(ctypes.c_char),
+    ))
+
+    _c_create_preprocessor = staticmethod(_import_func(
+        "ada_gpr_project_create_preprocessor",
+        [_c_type, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)],
+        _file_reader,
+    ))
+
+    _c_initialize_context = staticmethod(_import_func(
+        "ada_gpr_project_initialize_context",
+        [_c_type,                  # gpr_project
+         AnalysisContext._c_type, # context
+         ctypes.c_char_p,         # project
+         _event_handler,          # event_handler
+         ctypes.c_int,            # with_trivia
+         ctypes.c_int],           # tab_stop
+        None,
+    ))

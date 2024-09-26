@@ -143,7 +143,6 @@ TaskBody[1:1-24:29]
 |  |  |  |  |  |  |  |  |f_name:
 |  |  |  |  |  |  |  |  |  Id[6:30-6:34]: Item
 |  |  |  |  |  |  |  |  |f_constraint: <null>
-|  |  |  |  |  |f_aspects: <null>
 |  |  |  |f_default_expr: <null>
 |  |  |  |f_renaming_clause: <null>
 |  |  |  |f_aspects: <null>
@@ -170,8 +169,12 @@ TaskBody[1:1-24:29]
 |  |  |  |  |  |  |  |f_stmts:
 |  |  |  |  |  |  |  |  StmtList[11:13-15:34]
 |  |  |  |  |  |  |  |  |  AcceptStmtWithStmts[11:13-13:24]
-|  |  |  |  |  |  |  |  |  |f_name:
-|  |  |  |  |  |  |  |  |  |  Id[11:20-11:26]: Insert
+|  |  |  |  |  |  |  |  |  |f_body_decl:
+|  |  |  |  |  |  |  |  |  |  AcceptStmtBody[11:20-11:26]
+|  |  |  |  |  |  |  |  |  |  |f_name:
+|  |  |  |  |  |  |  |  |  |  |  DefiningName[11:20-11:26]
+|  |  |  |  |  |  |  |  |  |  |  |f_name:
+|  |  |  |  |  |  |  |  |  |  |  |  Id[11:20-11:26]: Insert
 |  |  |  |  |  |  |  |  |  |f_entry_index_expr: <null>
 |  |  |  |  |  |  |  |  |  |f_params:
 |  |  |  |  |  |  |  |  |  |  EntryCompletionFormalParams[11:27-11:47]
@@ -261,8 +264,12 @@ TaskBody[1:1-24:29]
 |  |  |  |  |  |  |  |f_stmts:
 |  |  |  |  |  |  |  |  StmtList[17:13-21:34]
 |  |  |  |  |  |  |  |  |  AcceptStmtWithStmts[17:13-19:24]
-|  |  |  |  |  |  |  |  |  |f_name:
-|  |  |  |  |  |  |  |  |  |  Id[17:20-17:26]: Remove
+|  |  |  |  |  |  |  |  |  |f_body_decl:
+|  |  |  |  |  |  |  |  |  |  AcceptStmtBody[17:20-17:26]
+|  |  |  |  |  |  |  |  |  |  |f_name:
+|  |  |  |  |  |  |  |  |  |  |  DefiningName[17:20-17:26]
+|  |  |  |  |  |  |  |  |  |  |  |f_name:
+|  |  |  |  |  |  |  |  |  |  |  |  Id[17:20-17:26]: Remove
 |  |  |  |  |  |  |  |  |  |f_entry_index_expr: <null>
 |  |  |  |  |  |  |  |  |  |f_params:
 |  |  |  |  |  |  |  |  |  |  EntryCompletionFormalParams[17:27-17:47]

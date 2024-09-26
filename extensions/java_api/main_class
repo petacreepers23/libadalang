@@ -1,0 +1,825 @@
+## vim: ft=makojava
+
+<%
+api = java_api
+nat = c_api.get_name
+%>
+
+    // ==========
+    // Define classes to handle project loading
+    // ==========
+
+    /**
+     * Exception to represent errors during project manipulation
+     */
+    public static final class ProjectManagerException extends RuntimeException {
+        ProjectManagerException(
+            final String message
+        ) {
+            super(message);
+        }
+    }
+
+    /**
+     * Enum to represent the source file mode for a GPR project
+     */
+    public static enum SourceFileMode {
+
+        // ----- Enum values -----
+
+        DEFAULT(0),
+        ROOT_PROJECT(1),
+        WHOLE_PROJECT(2),
+        WHOLE_PROJECT_WITH_RUNTIME(3),
+        ;
+
+        // ----- Class attributes -----
+
+        /** Singleton that represents the none source file mode */
+        public static final SourceFileMode NONE = DEFAULT;
+
+        /** The map from int to enum values */
+        private static final Map<Integer, SourceFileMode> map = new HashMap<>();
+
+        // ----- Instance attributes -----
+
+        /** The value of the instance */
+        private final int value;
+
+        // ----- Constructors -----
+
+        /**
+         * The private constructor
+         */
+        private SourceFileMode(
+            final int value
+        ) {
+            this.value = value;
+        }
+
+        static {
+            for(SourceFileMode elem : SourceFileMode.values()) {
+                map.put(elem.value, elem);
+            }
+        }
+
+        // ----- Enum methods -----
+
+        /**
+         * Get a source file mode from a native integer value.
+         *
+         * @param cValue The native value of the enum.
+         * @return The Java source file mode.
+         * @throws EnumException If the given native value doesn't correspond
+         * to an actual enum value.
+         */
+        public static SourceFileMode fromC(
+            final int cValue
+        ) throws EnumException {
+            if(!map.containsKey(cValue))
+                throw new EnumException(
+                    "Cannot get SourceFileMode from " + cValue
+                );
+            return (SourceFileMode) map.get(cValue);
+        }
+
+        /**
+         * Get the native integer value of the enum instance.
+         *
+         * @return The native C value.
+         */
+        public int toC() {
+            return this.value;
+        }
+
+    }
+
+    /**
+     * This class represents a scenario variable for a GPR project file.
+     */
+    public static final class ScenarioVariable {
+
+        // ----- Class attributes -----
+
+        /** Singleton that represents the none scenario variable. */
+        public static final ScenarioVariable NONE =
+            new ScenarioVariable(null, null);
+
+        // ----- Instance attributes -----
+
+        /** The name of the variable. */
+        public final String name;
+
+        /** The value of the variable. */
+        public final String value;
+
+        // ----- Constructors -----
+
+        /**
+         * Create a new scenario variable with its name and value.
+         *
+         * @param name Name of the variable.
+         * @param value Value of the variable.
+         */
+        ScenarioVariable(
+            final String name,
+            final String value
+        ) {
+            this.name = name;
+            this.value = value;
+        }
+
+        /**
+         * Public method to create scenario variable.
+         * This method raise a runtime exception if name or value is null.
+         *
+         * @param name Name of the variable.
+         * @param value Value of the variable.
+         */
+        public static ScenarioVariable create(
+            final String name,
+            final String value
+        ) {
+            if(name == null) throw new RuntimeException("Scenario variable name cannot be null");
+            if(value == null) throw new RuntimeException("Scenario variable value cannot be null");
+            return new ScenarioVariable(name, value);
+        }
+
+        // ----- Graal C API methods -----
+
+        /**
+         * Wrap the given pointer to a native scenario variable.
+         *
+         * @param pointer The pointer to the native scenario variable.
+         * @return The wrapped scenario variable.
+         */
+        public static ScenarioVariable wrap(
+            final Pointer pointer
+        ) {
+            return wrap((ScenarioVariableNative) pointer.readWord(0));
+        }
+
+        /**
+         * Wrap the given native scenario variable.
+         *
+         * @param scenarioVariableNative The native scenario variable.
+         * @return The wrapped scenario variable.
+         */
+        public static ScenarioVariable wrap(
+            final ScenarioVariableNative scenarioVariableNative
+        ) {
+            final CCharPointer nameNative = scenarioVariableNative.get_name();
+            final CCharPointer valueNative = scenarioVariableNative.get_value();
+            return new ScenarioVariable(
+                nameNative.isNull() ?
+                    null :
+                    toJString(nameNative),
+                valueNative.isNull() ?
+                    null :
+                    toJString(valueNative)
+            );
+        }
+
+        /**
+         * Unwrap the scenario variable in the given native value.
+         *
+         * @param scenarioVariableNative The native value to fill.
+         */
+        public void unwrap(
+            final ScenarioVariableNative scenarioVariableNative
+        ) {
+            final CCharPointer nameNative = this.name == null ?
+                WordFactory.nullPointer() :
+                toCString(this.name);
+            final CCharPointer valueNative = this.value == null ?
+                WordFactory.nullPointer() :
+                toCString(this.value);
+            scenarioVariableNative.set_name(nameNative);
+            scenarioVariableNative.set_value(valueNative);
+        }
+
+        /**
+         * Release the given native scenario variable allocated strings.
+         *
+         * @param scenarioVariableNative The native scenario variable to release.
+         */
+        public static void release(
+            final ScenarioVariableNative scenarioVariableNative
+        ) {
+            if(scenarioVariableNative.get_name().isNonNull()) {
+                UnmanagedMemory.free(scenarioVariableNative.get_name());
+            }
+            if(scenarioVariableNative.get_value().isNonNull()) {
+                UnmanagedMemory.free(scenarioVariableNative.get_value());
+            }
+        }
+
+        // ----- Override methods -----
+
+        /** @see java.lang.Object#toString() */
+        public String toString() {
+            return "ScenarioVariable(" +
+                this.name + " = " + this.value +
+                ")";
+        }
+
+    }
+
+    /**
+     * This class is used for the GPR project loading.
+     */
+    public static final class ProjectManager implements AutoCloseable {
+
+        // ----- Class attributes -----
+
+        /** Singleton that represents the none project manager. */
+        public static final ProjectManager NONE =
+            new ProjectManager(PointerWrapper.nullPointer());
+
+        // ----- Instance attributes -----
+
+        /** Reference to the native value. */
+        private final PointerWrapper reference;
+
+        /**
+         * List of diagnostics emitted by the native API during the project
+         * opening.
+         */
+        private final List<String> diagnostics;
+
+        // ----- Constructors -----
+
+        /**
+         * Create a new project manager from its native reference.
+         *
+         * @param reference The reference to the native project manager.
+         */
+        ProjectManager(
+            final PointerWrapper reference
+        ) {
+            this.reference = reference;
+            this.diagnostics = new ArrayList<>();
+        }
+
+        /**
+         * Create a project manager for the given project file.
+         *
+         * @param projectFile The GPR project file to load.
+         */
+        public static ProjectManager create(
+            final String projectFile
+        ) {
+            return internalCreate(
+                projectFile,
+                null,
+                null,
+                null,
+                null
+            );
+        }
+
+        /**
+         * Create a project manager from a project file, target and runtime. If the
+         * project file is null, then an implicit project is loaded.
+         *
+         * @param projectFile The GPR project file to use, if any. If null, an
+         *     implicit project will be loaded.
+         * @param scenarioVariables Scenario variables to use during the
+         *     project loading. This can be null.
+         * @param target Ada target to use. This can be null.
+         * @param runtime Ada runtime to use. This can be null.
+         * @param configFile The absolute path to a .cgpr file to use during
+         *     the project loading. This can be null.
+         */
+        public static ProjectManager create(
+            final String projectFile,
+            final ScenarioVariable[] scenarioVariables,
+            final String target,
+            final String runtime,
+            final String configFile
+        ) {
+            return internalCreate(
+                projectFile,
+                scenarioVariables,
+                target,
+                runtime,
+                configFile
+            );
+        }
+
+        /**
+         * Create a project manager for an implicit project. The current directory
+         * is used as project source directory.
+         *
+         * @param target Ada target to use. This can be null.
+         * @param runtime Ada runtime to use. This can be null.
+         * @param configFile The absolute path to a .cgpr file to use during
+         *     the project loading. This can be null.
+         */
+        public static ProjectManager createImplicit(
+            final String target,
+            final String runtime,
+            final String configFile
+        ) {
+            return internalCreate(
+                null,
+                null,
+                target,
+                runtime,
+                configFile
+            );
+        }
+
+        /**
+         * Internal creation method to generalize project creation while
+         * presenting different API endpoints to the user.
+         *
+         * @param projectFile The GPR project file to use, if any. If null, an
+         *     implicit project will be loaded.
+         * @param scenarioVariables Scenario variables to use during the
+         *     project loading. This can be null.
+         * @param target Ada target to use. This can be null.
+         * @param runtime Ada runtime to use. This can be null.
+         * @param configFile The absolute path to a .cgpr file to use during
+         *     the project loading. This can be null.
+         */
+        private static ProjectManager internalCreate(
+            final String projectFile,
+            final ScenarioVariable[] scenarioVariables,
+            final String target,
+            final String runtime,
+            final String configFile
+        ) {
+
+            if(ImageInfo.inImageCode()) {
+                // Declare native values
+                final Pointer scenarioVariablesNative;
+                final CCharPointer targetNative;
+                final CCharPointer runtimeNative;
+                final CCharPointer configFileNative;
+                final Pointer errorsPointer;
+
+                // Create the scenario variable array
+                final int scenarioVariableNativeSize = SizeOf.get(ScenarioVariableNative.class);
+                if(scenarioVariables != null && scenarioVariables.length > 0) {
+                    final int size = scenarioVariables.length + 1;
+                    scenarioVariablesNative = UnmanagedMemory.calloc(
+                        size * scenarioVariableNativeSize
+                    );
+                    for(int i = 0 ; i < scenarioVariables.length ; i++) {
+                        final ScenarioVariableNative scenarioVariableNative = (ScenarioVariableNative)
+                            scenarioVariablesNative.add(i * scenarioVariableNativeSize);
+                        scenarioVariables[i].unwrap(scenarioVariableNative);
+                    }
+                } else {
+                    scenarioVariablesNative = WordFactory.nullPointer();
+                }
+
+                // Prepare the result pointer
+                final Pointer projectPointer = StackValue.get(SizeOf.get(VoidPointer.class));
+                projectPointer.writeWord(0, WordFactory.nullPointer());
+
+                // Fill the native arguments
+                targetNative = target == null ? WordFactory.nullPointer() : toCString(target);
+                runtimeNative = runtime == null ? WordFactory.nullPointer() : toCString(runtime);
+                configFileNative = configFile == null ? WordFactory.nullPointer() : toCString(configFile);
+                errorsPointer = StackValue.get(SizeOf.get(WordPointer.class));
+                errorsPointer.writeWord(0, WordFactory.nullPointer());
+
+                // If the provided project file is null, call the implicit project loading.
+                // Otherwise, call the standard project loading.
+                if (projectFile == null) {
+                    NI_LIB.${nat("gpr_project_load_implicit")}(
+                        targetNative,
+                        runtimeNative,
+                        configFileNative,
+                        projectPointer,
+                        errorsPointer
+                    );
+                } else {
+                    final CCharPointer projectFileNative = toCString(projectFile);
+                    NI_LIB.${nat("gpr_project_load")}(
+                        projectFileNative,
+                        scenarioVariablesNative,
+                        targetNative,
+                        runtimeNative,
+                        configFileNative,
+                        0,
+                        projectPointer,
+                        errorsPointer
+                    );
+                    UnmanagedMemory.free(projectFileNative);
+                }
+
+                // Free the allocated strings
+                if (target != null) UnmanagedMemory.free(targetNative);
+                if (runtime != null) UnmanagedMemory.free(runtimeNative);
+                if (configFile != null) UnmanagedMemory.free(configFileNative);
+
+                // Check the langkit exception and cast it into a project manager error
+                try {
+                    checkException();
+                } catch (LangkitException e) {
+                    throw new ProjectManagerException(e.getMessage());
+                }
+
+                // Get the result of modified values
+                final ProjectManagerNative projectManagerNative = (ProjectManagerNative) projectPointer.readWord(0);
+                final StringArrayNative errorArrayNative = (StringArrayNative) errorsPointer.readWord(0);
+
+                // Free the scenario variables
+                if(scenarioVariablesNative.isNonNull()) {
+                    for(int i = 0 ; i < scenarioVariables.length ; i++) {
+                        final ScenarioVariableNative scenarioVariableNative = (ScenarioVariableNative)
+                            scenarioVariablesNative.add(i * scenarioVariableNativeSize);
+                        ScenarioVariable.release(scenarioVariableNative);
+                    }
+                    UnmanagedMemory.free(scenarioVariablesNative);
+                }
+
+                // `errorsPointer` is not allocated if an exception was raised during project file loading
+                String[] errors = new String[0];
+                if (errorArrayNative.isNonNull()) {
+                    // Translate the error native array into a Java array
+                    errors = toJStringArray(errorArrayNative);
+
+                    // Free the error array
+                    NI_LIB.${nat("free_string_array")}(errorArrayNative);
+                }
+
+                // Check the langkit exception and cast it into a project manager error
+                try {
+                    checkException();
+                } catch (LangkitException e) {
+                    throw new ProjectManagerException(e.getMessage());
+                }
+
+                // Create the result project manager and add diagnostics if any
+                final ProjectManager res = wrap(projectManagerNative);
+                if (errors.length > 0) {
+                    res.diagnostics.addAll(List.of(errors));
+                }
+                return res;
+            } else {
+                // Call the native function from the stubs
+                final List<String> diagnostics = new ArrayList<>();
+                final PointerWrapper reference;
+                reference = JNI_LIB.${nat("gpr_project_load")}(
+                    projectFile,
+                    scenarioVariables,
+                    target,
+                    runtime,
+                    configFile,
+                    diagnostics
+                );
+
+                // Check the langkit exceptions
+                try {
+                    checkException();
+                } catch (LangkitException e) {
+                    throw new ProjectManagerException(e.getMessage());
+                }
+
+                // Return the project manager
+                final ProjectManager res = new ProjectManager(reference);
+                res.diagnostics.addAll(diagnostics);
+                return res;
+            }
+
+        }
+
+        // ----- Graal C API methods -----
+
+        /**
+         * Wrap a native project manager in the Java class.
+         *
+         * @param pointer The pointer to the native project manager.
+         * @return The newly wrapped project manager.
+         */
+        static ProjectManager wrap(
+            final Pointer pointer
+        ) {
+            return wrap((ProjectManagerNative) pointer.readWord(0));
+        }
+
+        /**
+         * Wrap a native project manager in the Java class.
+         *
+         * @param projectManagerNative The native project manager to wrap.
+         * @return The newly wrapped project manager.
+         */
+        static ProjectManager wrap(
+            final ProjectManagerNative projectManagerNative
+        ) {
+            return new ProjectManager(new PointerWrapper(projectManagerNative));
+        }
+
+        /**
+         * Unwrap the project manager inside the given pointer.
+         *
+         * @param pointer The pointer to write in.
+         */
+        public void unwrap(
+            final Pointer pointer
+        ) {
+            pointer.writeWord(0, this.unwrap());
+        }
+
+        /**
+         * Get the native value of the project manager.
+         *
+         * @return The native project manager.
+         */
+        public ProjectManagerNative unwrap() {
+            return (ProjectManagerNative) this.reference.ni();
+        }
+
+        // ----- Class methods -----
+
+        /**
+         * Translate a native string array structure into a Java string
+         * array.
+         *
+         * @param stringArrayNative The native string array structure.
+         * @return The Java string array.
+         */
+        private static String[] toJStringArray(
+            final StringArrayNative stringArrayNative
+        ) {
+            final String[] res = new String[stringArrayNative.get_length()];
+            final CCharPointerPointer nativeFilesPointer = stringArrayNative.get_c_ptr();
+            for(int i = 0 ; i < res.length ; i++) {
+                final CCharPointer nativeFile = nativeFilesPointer.read(i);
+                res[i] = toJString(nativeFile);
+            }
+            return res;
+        }
+
+        // -----  Instance methods -----
+
+        public List<String> getDiagnostics() {
+            return this.diagnostics;
+        }
+
+        /**
+         * Create a unit provider for the given subproject.
+         *
+         * @param subproject The subproject for which to create a unit provider.
+         * @return The unit provider for the project manager.
+         */
+        public UnitProvider getProvider(final String subproject) {
+            final UnitProvider result;
+            if(ImageInfo.inImageCode()) {
+                final CCharPointer subprojectNative =
+                    subproject == null ?
+                    WordFactory.nullPointer() :
+                    toCString(subproject);
+
+                UnitProviderNative unitProviderNative = NI_LIB.${nat('gpr_project_create_unit_provider')}(
+                    this.reference.ni(),
+                    subprojectNative
+                );
+                result = UnitProvider.wrap(unitProviderNative);
+                if (subproject != null) {
+                    UnmanagedMemory.free(subprojectNative);
+                }
+            } else {
+                result = JNI_LIB.${nat("gpr_project_create_unit_provider")}(
+                    this,
+                    subproject
+                );
+            }
+            return result;
+        }
+
+        /**
+         * Create a unit provider for root project.
+         */
+        public UnitProvider getProvider() {
+            return this.getProvider(null);
+        }
+
+        ${java_doc("libadalang.gpr_project_create_context", 8)}
+        public AnalysisContext createContext(
+            String subproject,
+            EventHandler eventHandler,
+            boolean withTrivia,
+            int tabStop
+        ) {
+            if(ImageInfo.inImageCode()) {
+                // Prepare C values for native calls
+                final CCharPointer subproject_c =
+                  subproject == null
+                  ? WordFactory.nullPointer()
+                  : toCString(subproject);
+                EventHandlerNative eventHandler_c =
+                  eventHandler == null
+                  ? WordFactory.nullPointer()
+                  : eventHandler.reference.ni();
+
+                // Manually allocate a C-level analysis context so that we can
+                // initialize it ourselves.
+                final PointerWrapper context = new PointerWrapper(
+                    NI_LIB.${nat("allocate_analysis_context")}()
+                );
+
+                // Create the Java wrapper, so that we have one ready for
+                // event handler callbacks triggered during context
+                // initialization.
+                AnalysisContext result =
+                    AnalysisContext.fromReference(context, eventHandler, true);
+
+                // "result" has its own ownership share: release ours
+                NI_LIB.${nat("context_decref")}(context.ni());
+
+                // TODO: attach "this" to "result" so that the former lives at
+                // least as long as the former.
+
+                // Finally, initialize the analysis context. Note that this
+                // step may raise an exception: in that case, the analysis
+                // context is considered not initialized: release it.
+                NI_LIB.${nat("gpr_project_initialize_context")}(
+                    this.reference.ni(),
+                    context.ni(),
+                    subproject_c,
+                    eventHandler_c,
+                    withTrivia ? 1 : 0,
+                    tabStop
+                );
+                UnmanagedMemory.free(subproject_c);
+                final LangkitExceptionNative exc_c =
+                    NI_LIB.${nat("get_last_exception")}();
+                if (exc_c.isNonNull()) {
+                    LangkitException exc = wrapException(exc_c);
+                    NI_LIB.${nat("context_decref")}(context.ni());
+                    throw exc;
+                }
+
+                return result;
+            } else {
+                return JNI_LIB.${nat("gpr_project_create_context")}(
+                    this,
+                    subproject,
+                    eventHandler,
+                    withTrivia,
+                    tabStop
+                );
+            }
+        }
+
+        /**
+         * Get the files for the given subprojects in a string array.
+         *
+         * @param mode The file getting mode.
+         * @param subprojects The subprojects to consider.
+         * @return The array that contains the project files.
+         */
+        public String[] getFiles(
+            final SourceFileMode mode,
+            final String[] subprojects
+        ) {
+            // Verify if the project is null
+            if(this.reference.isNull())
+                return new String[0];
+
+            String[] result = null;
+            LangkitException exc;
+
+            if(ImageInfo.inImageCode()) {
+                // Convert the Java array of subprojects ("subprojects"
+                // argument) into the required C array
+                // (subprojectCount/subprojectsNative).
+                final int subprojectCount;
+                final CCharPointerPointer subprojectsNative;
+
+                if (subprojects != null && subprojects.length > 0) {
+                    subprojectCount = subprojects.length;
+                    subprojectsNative =
+                        UnmanagedMemory.calloc(
+                            subprojectCount * SizeOf.get(CCharPointerPointer.class)
+                        );
+                } else {
+                    subprojectCount = 0;
+                    subprojectsNative = WordFactory.nullPointer();
+                }
+
+                for (int i = 0; i < subprojectCount; ++i) {
+                    subprojectsNative.write(i, toCString(subprojects[i]));
+                }
+
+                // Call the C API. Keep track of a potential native exception.
+                StringArrayNative sourceFileArray =
+                    NI_LIB.${nat('gpr_project_source_files')}(
+                        this.reference.ni(),
+                        mode.toC(),
+                        subprojectsNative,
+                        subprojectCount
+                    );
+                exc = getLastException();
+
+                // If the call was successful, create the Java array result and
+                // initialize it, and free the C array result.
+                if(exc == null) {
+                    result = toJStringArray(sourceFileArray);
+                    NI_LIB.${nat("free_string_array")}(sourceFileArray);
+                }
+
+                // Release subprojectsNative
+                for (int i = 0; i < subprojectCount; ++i) {
+                    UnmanagedMemory.free(subprojectsNative.read(i));
+                }
+                if (subprojectCount > 0) {
+                    UnmanagedMemory.free(subprojectsNative);
+                }
+            } else {
+                result = JNI_LIB.${nat("gpr_project_source_files")}(
+                    this,
+                    mode.toC(),
+                    subprojects
+                );
+                exc = getLastException();
+            }
+
+            // If we got an exception, turn it into a ProjectManagerException
+            // one.
+            if(exc != null) {
+                throw new ProjectManagerException(exc.getMessage());
+            }
+
+            return result;
+
+        }
+
+        /**
+         * Get the files of the root project in a string array.
+         *
+         * @param mode The file getting mode.
+         * @return The array that contains the project files.
+         */
+        public String[] getFiles(final SourceFileMode mode) {
+            return this.getFiles(mode, null);
+        }
+
+        /** @see java.lang.AutoCloseable#close() */
+        @Override
+        public void close() {
+
+            if(ImageInfo.inImageCode()) {
+                NI_LIB.${nat("gpr_project_free")}(this.reference.ni());
+            } else {
+                JNI_LIB.${nat("gpr_project_free")}(this);
+            }
+
+        }
+
+    }
+
+    ${java_doc("libadalang.create_auto_provider", 4)}
+    public static UnitProvider createAutoProvider(
+        final String[] sourceFiles,
+        final String charset
+    ) {
+        if (ImageInfo.inImageCode()) {
+            final CCharPointer charsetNative =
+                charset == null ?
+                WordFactory.nullPointer() :
+                toCString(charset);
+
+            // Allocate the C array of C strings that will contain decoded
+            // source file names. Make room for one additional null pointer
+            // to mark the end of the array.
+            final CCharPointerPointer sourceFilesNative =
+                UnmanagedMemory.calloc(
+                    (sourceFiles.length + 1) * SizeOf.get(CCharPointerPointer.class)
+                );
+
+            for (int i = 0; i < sourceFiles.length; ++i) {
+                sourceFilesNative.write(i, toCString(sourceFiles[i]));
+            }
+
+            // Create the auto provider
+            final UnitProviderNative unitProviderNative =
+                NI_LIB.${nat('create_auto_provider')}(
+                    sourceFilesNative,
+                    charsetNative
+                );
+
+            // Release all temporarily allocated memory
+            for (int i = 0; i < sourceFiles.length; ++i) {
+                UnmanagedMemory.free(sourceFilesNative.read(i));
+            }
+
+            UnmanagedMemory.free(sourceFilesNative);
+
+            if (charset != null) {
+                UnmanagedMemory.free(charsetNative);
+            }
+
+            return UnitProvider.wrap(unitProviderNative);
+        } else {
+            return JNI_LIB.${nat("create_auto_provider")}(
+                sourceFiles,
+                charset
+            );
+        }
+    }

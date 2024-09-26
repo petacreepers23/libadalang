@@ -1,40 +1,47 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
-with Ada.Strings.Unbounded;
+with Ada.Containers.Vectors;
+with Ada.Exceptions;        use Ada.Exceptions;
+with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
+
 with Interfaces.C.Strings; use Interfaces.C.Strings;
 
-with GNATCOLL.Locks;
-with GNATCOLL.Projects; use GNATCOLL.Projects;
-with GNATCOLL.VFS;      use GNATCOLL.VFS;
+with GNAT.Task_Lock;
+
+with GNATCOLL.File_Paths; use GNATCOLL.File_Paths;
+with GNATCOLL.Projects;   use GNATCOLL.Projects;
+with GNATCOLL.VFS;        use GNATCOLL.VFS;
+with GPR2.Containers;
+with GPR2.Message.Reporter;
+with GPR2.Options;
+with GPR2.Project.Tree;
+with GPR2.Project.View;
+with GPR2.Project.View.Set;
+
+with Langkit_Support.File_Readers; use Langkit_Support.File_Readers;
 
 with Libadalang.Analysis;          use Libadalang.Analysis;
 with Libadalang.Auto_Provider;     use Libadalang.Auto_Provider;
-with Libadalang.GPR_Lock;
+with Libadalang.Config_Pragmas;    use Libadalang.Config_Pragmas;
+with Libadalang.GPR_Impl;          use Libadalang.GPR_Impl;
+with Libadalang.GPR_Utils;         use Libadalang.GPR_Utils;
+with Libadalang.Preprocessing;     use Libadalang.Preprocessing;
 with Libadalang.Project_Provider;  use Libadalang.Project_Provider;
 with Libadalang.Public_Converters; use Libadalang.Public_Converters;
 
 package body Libadalang.Implementation.C.Extensions is
+
+   type GPR2_Tree_Access is access all GPR2.Project.Tree.Object;
+   pragma No_Strict_Aliasing (GPR2_Tree_Access);
+   procedure Free is new Ada.Unchecked_Deallocation
+     (GPR2.Project.Tree.Object, GPR2_Tree_Access);
+   function Wrap is new Ada.Unchecked_Conversion
+     (GPR2_Tree_Access, ada_gpr_project);
+   function Unwrap is new Ada.Unchecked_Conversion
+     (ada_gpr_project, GPR2_Tree_Access);
 
    function To_C_Provider
      (Provider : Unit_Provider_Reference) return ada_unit_provider
@@ -45,15 +52,54 @@ package body Libadalang.Implementation.C.Extensions is
    --  Return the number of scenario variables in the Scenario_Vars C-style
    --  array. This counts the number of entries before the first NULL entry.
 
+   package String_Vectors is new Ada.Containers.Vectors
+     (Positive, Unbounded_String);
+
+   function To_C (Self : String_Vectors.Vector) return ada_string_array_ptr;
+   --  Convert a list of strings to the corresponding C value
+
    procedure Load_Project
-     (Project_File    : chars_ptr;
-      Scenario_Vars   : System.Address;
-      Target, Runtime : chars_ptr;
-      Tree            : out Project_Tree_Access;
-      Env             : out Project_Environment_Access);
-   --  Helper to load a project file from C arguments. May propagate a
-   --  GNATCOLL.Projects.Invalid_Project exception if the project cannot be
-   --  loaded.
+     (Project_File                 : chars_ptr;
+      Scenario_Vars                : System.Address;
+      Target, Runtime, Config_File : chars_ptr;
+      Tree                         : out GPR2.Project.Tree.Object;
+      Errors                       : out String_Vectors.Vector;
+      Exc                          : out Exception_Occurrence);
+   --  Helper to load a project file from C arguments. May set Exc to a
+   --  ``GNATCOLL.Projects.Invalid_Project`` exception if the project cannot be
+   --  loaded: in this case it is up to the caller to re-raise it.
+   --  If ``Project_File`` is a null pointer or an empty string, use the
+   --  ``GNATCOLL.Projects.Load_Implicit_Project`` function to load the
+   --  ``_default.gpr`` project file in the current directory.
+
+   function Fetch_Project
+     (Tree         : GPR2.Project.Tree.Object;
+      Project_Name : chars_ptr) return GPR2.Project.View.Object;
+   --  Helper to fetch the sub-project in ``Tree`` that is called
+   --  ``Project_Name``. If that project is unknown, raise a
+   --  ``GPR2.Project_Error`` exception. If ``Project_Name`` is null or an
+   --  empty string, return ``Undefined``.
+
+   ---------------------------
+   -- GPR2 Message Reporter --
+   ---------------------------
+
+   --  The following declares a singleton GPR2 message reporter (a global data
+   --  structure, see eng/gpr/gpr-issues#354) whose only purpose is to store
+   --  reported message to a global vector. This allows us to gather all
+   --  emitted messages during project loading. Since global resources are
+   --  involved, usage of this singleton/vector needs to be protected by
+   --  GNAT.Task_Lock.
+
+   type GPR2_Reporter_Type is new GPR2.Message.Reporter.Object
+   with null record;
+
+   overriding procedure Report
+     (Self : GPR2_Reporter_Type; Message : GPR2.Message.Object);
+   overriding procedure Report (Self : GPR2_Reporter_Type; Message : String);
+
+   GPR2_Reporter          : GPR2_Reporter_Type;
+   GPR2_Reporter_Messages : String_Vectors.Vector;
 
    -------------------------
    -- Scenario_Vars_Count --
@@ -62,7 +108,7 @@ package body Libadalang.Implementation.C.Extensions is
    function Scenario_Vars_Count (Scenario_Vars : System.Address) return Natural
    is
       Result : Natural := 1;
-      SV     : Project_Scenario_Variable_Array (Positive)
+      SV     : ada_gpr_project_scenario_variable_array (Positive)
          with Import  => True,
               Address => Scenario_Vars;
    begin
@@ -73,134 +119,295 @@ package body Libadalang.Implementation.C.Extensions is
       return Result - 1;
    end Scenario_Vars_Count;
 
+   ----------
+   -- To_C --
+   ----------
+
+   function To_C (Self : String_Vectors.Vector) return ada_string_array_ptr is
+      I   : int := 1;
+   begin
+      return Result : constant ada_string_array_ptr :=
+        new ada_string_array (int (Self.Length))
+      do
+         Result.C_Ptr := Result.Items'Address;
+         for F of Self loop
+            Result.Items (I) :=
+              New_String (Ada.Strings.Unbounded.To_String (F));
+            I := I + 1;
+         end loop;
+      end return;
+   end To_C;
+
    ------------------
    -- Load_Project --
    ------------------
 
    procedure Load_Project
-     (Project_File    : chars_ptr;
-      Scenario_Vars   : System.Address;
-      Target, Runtime : chars_ptr;
-      Tree            : out Project_Tree_Access;
-      Env             : out Project_Environment_Access)
+     (Project_File                 : chars_ptr;
+      Scenario_Vars                : System.Address;
+      Target, Runtime, Config_File : chars_ptr;
+      Tree                         : out GPR2.Project.Tree.Object;
+      Errors                       : out String_Vectors.Vector;
+      Exc                          : out Exception_Occurrence)
    is
-      use type System.Address;
-
-      Dummy : GNATCOLL.Locks.Scoped_Lock (Libadalang.GPR_Lock.Lock'Access);
-
-      PF            : constant String := Value (Project_File);
-      Target_Value  : constant String :=
+      Project_File_Value : constant String :=
+        (if Project_File = Null_Ptr then "" else Value (Project_File));
+      Target_Value       : constant String :=
         (if Target = Null_Ptr then "" else Value (Target));
-      Runtime_Value : constant String :=
+      Runtime_Value      : constant String :=
         (if Runtime = Null_Ptr then "" else Value (Runtime));
+      Config_File_Value  : constant String :=
+        (if Config_File = Null_Ptr then "" else Value (Config_File));
+
+      Options : GPR2.Options.Object;
    begin
+      if Project_File_Value = "" then
+         Options.Add_Switch (GPR2.Options.No_Project);
+      else
+         Options.Add_Switch (GPR2.Options.P, Project_File_Value);
+      end if;
 
-      --  Initialize the environment (target, runtime, externals) before
-      --  loading the project.
+      if Target_Value /= "" then
+         Options.Add_Switch (GPR2.Options.Target, Target_Value);
+      end if;
 
-      Tree := new Project_Tree;
-      Initialize (Env);
-      Env.Set_Target_And_Runtime (Target_Value, Runtime_Value);
+      if Runtime_Value /= "" then
+         Options.Add_Switch (GPR2.Options.RTS, Runtime_Value);
+      end if;
+
+      if Config_File_Value /= "" then
+         Options.Add_Switch (GPR2.Options.Config, Config_File_Value);
+      end if;
+
       if Scenario_Vars /= System.Null_Address then
          declare
-            Vars : Project_Scenario_Variable_Array
+            Vars : ada_gpr_project_scenario_variable_array
                      (1 .. Scenario_Vars_Count (Scenario_Vars))
                with Import  => True,
                     Address => Scenario_Vars;
          begin
             for V of Vars loop
-               Change_Environment (Env.all, Value (V.Name), Value (V.Value));
+               declare
+                  Var_Name  : constant String := Value (V.Name);
+                  Var_Value : constant String := Value (V.Value);
+               begin
+                  Options.Add_Switch
+                    (GPR2.Options.X, Var_Name & "=" & Var_Value);
+               end;
             end loop;
          end;
       end if;
 
-      --  Try to load the project
+      --  Load the project tree and include source information.
+      --
+      --  The processing of messages involves a global data structure
+      --  (GPR2.Message.Register_Reporter), so run this in a critical section.
 
       begin
-         Load (Self                => Tree.all,
-               Root_Project_Path   => Create (+PF),
-               Env                 => Env,
-               Report_Missing_Dirs => False);
+         GNAT.Task_Lock.Lock;
+         GPR2.Message.Reporter.Register_Reporter (GPR2_Reporter);
+         GPR2_Reporter_Messages.Clear;
+
+         --  Never complain about missing directories: most of the time for
+         --  users, this is noise about object directories.
+
+         begin
+            if not Tree.Load
+              (Options,
+               Absent_Dir_Error => GPR2.No_Error,
+               With_Runtime     => True)
+            then
+               raise GPR2.Project_Error with
+                 "fatal error, cannot load the project tree";
+            end if;
+
+            --  Now load information for all source files
+
+            Tree.Update_Sources;
+         exception
+            when E : GPR2.Project_Error =>
+               Save_Occurrence (Exc, E);
+         end;
+
+         GNAT.Task_Lock.Unlock;
       exception
-         when Invalid_Project =>
-            Free (Tree);
-            Free (Env);
+         when others =>
+            GNAT.Task_Lock.Unlock;
             raise;
       end;
+
+      --  Forward warnings and errors sent to the GPR2 message reporter
+      --  to Errors.
+
+      Errors.Append_Vector (GPR2_Reporter_Messages);
    end Load_Project;
 
-   --------------------------------------
-   -- ada_create_project_unit_provider --
-   --------------------------------------
+   -------------------
+   -- Fetch_Project --
+   -------------------
 
-   function ada_create_project_unit_provider
-     (Project_File, Project : chars_ptr;
-      Scenario_Vars         : System.Address;
-      Target, Runtime       : chars_ptr) return ada_unit_provider
+   function Fetch_Project
+     (Tree         : GPR2.Project.Tree.Object;
+      Project_Name : chars_ptr) return GPR2.Project.View.Object
    is
-      Null_Result : constant ada_unit_provider :=
-        ada_unit_provider (System.Null_Address);
+      Name : constant String :=
+        (if Project_Name = Null_Ptr then "" else Value (Project_Name));
+   begin
+      return Result : GPR2.Project.View.Object do
+         if Name /= "" then
+            Result := Lookup (Tree, Name);
+         end if;
+      end return;
+   end Fetch_Project;
 
-      --  The following locals contain dynamically allocated resources. If
-      --  project loading is successful, the result will own them, but in case
-      --  of error, they should be free'd using the Error function below.
+   ------------
+   -- Report --
+   ------------
 
-      Tree : Project_Tree_Access;
-      Env  : Project_Environment_Access;
-      Prj  : Project_Type := No_Project;
+   overriding procedure Report
+     (Self : GPR2_Reporter_Type; Message : GPR2.Message.Object) is
+   begin
+      GPR2_Reporter_Messages.Append (To_Unbounded_String (Message.Format));
+   end Report;
 
-      procedure Free;
-      --  Helper for error handling: free allocated resources
+   ------------
+   -- Report --
+   ------------
 
-      ----------
-      -- Free --
-      ----------
+   overriding procedure Report (Self : GPR2_Reporter_Type; Message : String) is
+   begin
+      GPR2_Reporter_Messages.Append (To_Unbounded_String (Message));
+   end Report;
 
-      procedure Free is
-      begin
-         Free (Env);
-         Free (Tree);
-      end Free;
+   ---------------------------
+   -- ada_free_string_array --
+   ---------------------------
 
+   procedure ada_free_string_array (Strings : ada_string_array_ptr) is
+      Value : ada_string_array_ptr := Strings;
+   begin
+      for F of Value.Items loop
+         Free (F);
+      end loop;
+      Free (Value);
+   end ada_free_string_array;
+
+   --------------------------
+   -- ada_gpr_project_load --
+   --------------------------
+
+   procedure ada_gpr_project_load
+     (Project_File                 : chars_ptr;
+      Scenario_Vars                : System.Address;
+      Target, Runtime, Config_File : chars_ptr;
+      Ada_Only                     : int;
+      Project                      : access ada_gpr_project;
+      Errors                       : access ada_string_array_ptr)
+   is
+      P   : GPR2_Tree_Access;
+      Err : String_Vectors.Vector;
+      Exc : Exception_Occurrence;
    begin
       Clear_Last_Exception;
 
-      Load_Project (Project_File, Scenario_Vars, Target, Runtime, Tree, Env);
+      P := new GPR2.Project.Tree.Object;
+      if Ada_Only /= 0 then
+         declare
+            Langs : GPR2.Containers.Language_Set;
+         begin
+            Langs.Include (GPR2.Ada_Language);
+            P.Restrict_Autoconf_To_Languages (Langs);
+         end;
+      end if;
+      Load_Project
+        (Project_File,
+         Scenario_Vars,
+         Target,
+         Runtime,
+         Config_File,
+         P.all,
+         Err,
+         Exc);
+      if Exception_Identity (Exc) /= Null_Id then
 
-      declare
-         P : constant String :=
-           (if Project = Null_Ptr then "" else Value (Project));
-      begin
-         if P /= "" then
-            --  A specific project was requested: try to build one unit
-            --  provider just for it. Lookup the project by name, and then if
-            --  not found, by path.
-            Prj := Tree.Project_From_Name (P);
-            if Prj = No_Project then
-               Prj := Tree.Project_From_Path (Create (+P));
-            end if;
-            if Prj = No_Project then
-               Free;
-               raise GNATCOLL.Projects.Invalid_Project
-                  with "no such project: " & P;
-            end if;
+         --  If we have error messages in addition to the exception, extend the
+         --  exception message to include them.
+
+         if not Err.Is_Empty then
+            declare
+               Message : Unbounded_String :=
+                 To_Unbounded_String (Exception_Message (Exc));
+            begin
+               for Error_Message of Err loop
+                  Append (Message, ASCII.LF);
+                  Append (Message, Error_Message);
+               end loop;
+               Set_Last_Exception
+                 (Exception_Identity (Exc), To_String (Message));
+            end;
+         else
+            Set_Last_Exception (Exc);
          end if;
-      end;
+         Free (P);
+         return;
+      end if;
 
-      return To_C_Provider
-        (Create_Project_Unit_Provider (Tree, Prj, Env, True));
+      Project.all := Wrap (P);
+      Errors.all := To_C (Err);
+   end ada_gpr_project_load;
 
+   -----------------------------------
+   -- ada_gpr_project_load_implicit --
+   -----------------------------------
+
+   procedure ada_gpr_project_load_implicit
+     (Target, Runtime, Config_File : chars_ptr;
+      Project                      : access ada_gpr_project;
+      Errors                       : access ada_string_array_ptr)
+   is
+   begin
+      ada_gpr_project_load
+        (Null_Ptr,
+         System.Null_Address,
+         Target,
+         Runtime,
+         Config_File,
+         0,
+         Project,
+         Errors);
+   end ada_gpr_project_load_implicit;
+
+   --------------------------
+   -- ada_gpr_project_free --
+   --------------------------
+
+   procedure ada_gpr_project_free (Self : ada_gpr_project) is
+      Var_Self : GPR2_Tree_Access := Unwrap (Self);
+   begin
+      Clear_Last_Exception;
+      Free (Var_Self);
+   end ada_gpr_project_free;
+
+   ------------------------------------------
+   -- ada_gpr_project_create_unit_provider --
+   ------------------------------------------
+
+   function ada_gpr_project_create_unit_provider
+     (Self    : ada_gpr_project;
+      Project : chars_ptr) return ada_unit_provider
+   is
+      P   : constant GPR2_Tree_Access := Unwrap (Self);
+      Prj : GPR2.Project.View.Object;
+   begin
+      Clear_Last_Exception;
+
+      Prj := Fetch_Project (P.all, Project);
+      return To_C_Provider (Create_Project_Unit_Provider (P.all, Prj));
    exception
-      when Exc : GNATCOLL.Projects.Invalid_Project =>
-         Free;
+      when Exc : Unsupported_View_Error | GPR2.Project_Error =>
          Set_Last_Exception (Exc);
-         return Null_Result;
-
-      when Exc : Unsupported_View_Error =>
-         Free;
-         Set_Last_Exception (Exc);
-         return Null_Result;
-   end ada_create_project_unit_provider;
+         return ada_unit_provider (System.Null_Address);
+   end ada_gpr_project_create_unit_provider;
 
    ------------------------------
    -- ada_create_auto_provider --
@@ -244,20 +451,20 @@ package body Libadalang.Implementation.C.Extensions is
       end;
    end ada_create_auto_provider;
 
-   ------------------------------
-   -- ada_project_source_files --
-   ------------------------------
+   ----------------------------------
+   -- ada_gpr_project_source_files --
+   ----------------------------------
 
-   function ada_project_source_files
-     (Project_File    : chars_ptr;
-      Scenario_Vars   : System.Address;
-      Target, Runtime : chars_ptr;
-      Mode            : int) return Source_File_Array_Ref_Access
+   function ada_gpr_project_source_files
+     (Self            : ada_gpr_project;
+      Mode            : int;
+      Projects_Data   : access chars_ptr;
+      Projects_Length : int) return ada_string_array_ptr
    is
-      Tree   : Project_Tree_Access;
-      Env    : Project_Environment_Access;
-      M      : Source_Files_Mode;
-      Result : Filename_Vectors.Vector;
+      P        : constant GPR2_Tree_Access := Unwrap (Self);
+      M        : Source_Files_Mode;
+      Projects : GPR2.Project.View.Set.Object;
+      Result   : Filename_Vectors.Vector;
    begin
       Clear_Last_Exception;
 
@@ -271,52 +478,307 @@ package body Libadalang.Implementation.C.Extensions is
             return null;
       end;
 
-      --  Load the project file and compute the list of source files
+      --  Decode the ``Projects_Data``/``Projects_Length`` argument
 
-      begin
-         Load_Project
-           (Project_File, Scenario_Vars, Target, Runtime, Tree, Env);
-      exception
-         when Exc : Invalid_Project =>
-            Set_Last_Exception (Exc);
-            return null;
-      end;
+      if Projects_Data /= null then
+         declare
+            Projects_Array : array (1 .. Natural (Projects_Length))
+                             of chars_ptr
+            with Import, Address => Projects_Data.all'Address;
+         begin
+            for I in Projects_Array'Range loop
+               Projects.Include
+                 (Fetch_Project (P.all, Projects_Array (I)));
+            end loop;
+         exception
+            when Exc : GPR2.Project_Error =>
+               Set_Last_Exception (Exc);
+               return null;
+         end;
+      end if;
 
-      Result := Source_Files (Tree.all, M);
-      Free (Tree);
-      Free (Env);
+      --  Compute the list of source files
+
+      Result := Source_Files (P.all, M, Projects);
 
       --  Convert the vector to the C API result
 
       declare
-         Ref : constant Source_File_Array_Ref_Access :=
-           new Source_File_Array_Ref (int (Result.Length));
-         I   : int := 1;
+         Sources : String_Vectors.Vector;
       begin
-         Ref.C_Ptr := Ref.Items'Address;
          for F of Result loop
-            Ref.Items (I) := New_String (Ada.Strings.Unbounded.To_String (F));
-            I := I + 1;
+            Sources.Append (F);
+         end loop;
+         return To_C (Sources);
+      end;
+   end ada_gpr_project_source_files;
+
+   -------------------------------------
+   -- ada_gpr_project_default_charset --
+   -------------------------------------
+
+   function ada_gpr_project_default_charset
+     (Self : ada_gpr_project; Project : chars_ptr) return chars_ptr is
+   begin
+      Clear_Last_Exception;
+      declare
+         Tree : GPR2.Project.Tree.Object renames Unwrap (Self).all;
+         Prj  : constant GPR2.Project.View.Object :=
+           Fetch_Project (Tree, Project);
+      begin
+         return New_String (Default_Charset_From_Project (Tree, Prj));
+      end;
+   end ada_gpr_project_default_charset;
+
+   --------------------------------------
+   -- ada_create_project_unit_provider --
+   --------------------------------------
+
+   function ada_create_project_unit_provider
+     (Project_File, Project : chars_ptr;
+      Scenario_Vars         : System.Address;
+      Target, Runtime       : chars_ptr) return ada_unit_provider
+   is
+      Tree : GPR2.Project.Tree.Object;
+      View : GPR2.Project.View.Object;
+
+      Exc          : Exception_Occurrence;
+      Dummy_Errors : String_Vectors.Vector;
+
+      Project_Value : constant String :=
+        (if Project = Null_Ptr then "" else Value (Project));
+   begin
+      Clear_Last_Exception;
+
+      --  Load the project tree
+
+      Load_Project
+        (Project_File,
+         Scenario_Vars,
+         Target,
+         Runtime,
+         Null_Ptr,
+         Tree,
+         Dummy_Errors,
+         Exc);
+      if Exception_Identity (Exc) /= Null_Id then
+         Reraise_Occurrence (Exc);
+      end if;
+
+      --  Fetch the requested sub-project, if any
+
+      if Project_Value /= "" then
+         View := Lookup (Tree, Project_Value);
+      end if;
+
+      --  Create the unit provider
+
+      return To_C_Provider (Create_Project_Unit_Provider (Tree, View));
+
+   exception
+      when Exc : Unsupported_View_Error | GPR2.Project_Error =>
+         Set_Last_Exception (Exc);
+         return ada_unit_provider (System.Null_Address);
+   end ada_create_project_unit_provider;
+
+   ----------------------------------------
+   -- ada_gpr_project_initialize_context --
+   ----------------------------------------
+
+   procedure ada_gpr_project_initialize_context
+     (Self          : ada_gpr_project;
+      Context       : ada_analysis_context;
+      Project       : chars_ptr;
+      Event_Handler : ada_event_handler;
+      With_Trivia   : int;
+      Tab_Stop      : int)
+   is
+      Tree : GPR2.Project.Tree.Object renames Unwrap (Self).all;
+      View : GPR2.Project.View.Object;
+   begin
+      Clear_Last_Exception;
+
+      View := Fetch_Project (Tree, Project);
+      Initialize_Context_From_Project
+        (Context          => Context,
+         Tree             => Tree,
+         Project          => View,
+         Event_Handler    => Unwrap_Private_Event_Handler (Event_Handler),
+         With_Trivia      => With_Trivia /= 0,
+         Tab_Stop         => Natural (Tab_Stop));
+   exception
+      when Exc : others =>
+         Set_Last_Exception (Exc);
+   end ada_gpr_project_initialize_context;
+
+   ---------------------------------------
+   -- ada_create_preprocessor_from_file --
+   ---------------------------------------
+
+   function ada_create_preprocessor_from_file
+     (Filename    : chars_ptr;
+      Path_Data   : access chars_ptr;
+      Path_Length : int;
+      Line_Mode   : access int) return ada_file_reader
+   is
+      Path   : Any_Path;
+      FR_Ref : File_Reader_Reference;
+   begin
+      Clear_Last_Exception;
+
+      --  Convert the given path data into an ``Any_Path`` value. To do this,
+      --  concatenate all of its strings separated with NUL bytes and let
+      --  ``Parse_Path`` split it back.
+
+      declare
+         Path_Array : array (1 .. Path_Length) of chars_ptr
+         with Import, Address => Path_Data.all'Address;
+
+         Path_Str : Unbounded_String;
+      begin
+         for I in Path_Array'Range loop
+            if I > 1 then
+               Append (Path_Str, ASCII.NUL);
+            end if;
+            Append (Path_Str, Value (Path_Array (I)));
          end loop;
 
-         return Ref;
+         Path := Parse_Path
+           (To_String (Path_Str), Separator => ASCII.NUL, CWD => If_Empty);
       end;
-   end ada_project_source_files;
 
-   --------------------------------
-   -- ada_free_source_file_array --
-   --------------------------------
+      --  Now create the file reader and wrap it to get the correct return type
 
-   procedure ada_free_source_file_array
-     (Source_Files : Source_File_Array_Ref_Access)
+      begin
+         if Line_Mode = null then
+            FR_Ref := Create_Preprocessor_From_File (Value (Filename), Path);
+         else
+            FR_Ref := Create_Preprocessor_From_File
+              (Value (Filename), Path, Any_Line_Mode'Val (Line_Mode.all));
+         end if;
+      exception
+         when Exc : File_Read_Error | Syntax_Error =>
+            Set_Last_Exception (Exc);
+            return ada_file_reader (System.Null_Address);
+      end;
+
+      declare
+         FR_Int : constant Internal_File_Reader_Access :=
+           Wrap_Public_File_Reader (FR_Ref);
+      begin
+         return Wrap_Private_File_Reader (FR_Int);
+      end;
+   end ada_create_preprocessor_from_file;
+
+   -----------------------------------------
+   -- ada_gpr_project_create_preprocessor --
+   -----------------------------------------
+
+   function ada_gpr_project_create_preprocessor
+     (Self      : ada_gpr_project;
+      Project   : chars_ptr;
+      Line_Mode : access int) return ada_file_reader
    is
-      S : Source_File_Array_Ref_Access;
+      P              : GPR2.Project.View.Object;
+      Default_Config : File_Config;
+      File_Configs   : File_Config_Maps.Map;
    begin
-      for F of Source_Files.Items loop
-         Free (F);
-      end loop;
-      S := Source_Files;
-      Free (S);
-   end ada_free_source_file_array;
+      Clear_Last_Exception;
+
+      P := Fetch_Project (Unwrap (Self).all, Project);
+
+      --  Load preprocessor data from the given project, then create the file
+      --  reader from that data.
+
+      Extract_Preprocessor_Data_From_Project
+        (Unwrap (Self).all, P, Default_Config, File_Configs);
+
+      --  If requested, force the line mode
+
+      if Line_Mode /= null then
+         declare
+            LM : constant Any_Line_Mode := Any_Line_Mode'Val (Line_Mode.all);
+
+            procedure Force_Line_Mode (Config : in out File_Config);
+            --  Callback for Iterate: force the line mode on Config to LM if
+            --  preprocessing is enabled for it.
+
+            ---------------------
+            -- Force_Line_Mode --
+            ---------------------
+
+            procedure Force_Line_Mode (Config : in out File_Config) is
+            begin
+               if Config.Enabled then
+                  Config.Line_Mode := LM;
+               end if;
+            end Force_Line_Mode;
+
+         begin
+            Iterate (Default_Config, File_Configs, Force_Line_Mode'Access);
+         end;
+      end if;
+
+      --  Create the file reader from that data
+
+      declare
+         FR_Ref : constant File_Reader_Reference :=
+           Create_Preprocessor (Default_Config, File_Configs);
+         FR_Int : constant Internal_File_Reader_Access :=
+           Wrap_Public_File_Reader (FR_Ref);
+      begin
+         return Wrap_Private_File_Reader (FR_Int);
+      end;
+
+   exception
+      when Exc : others =>
+         Set_Last_Exception (Exc);
+         return ada_file_reader (System.Null_Address);
+   end ada_gpr_project_create_preprocessor;
+
+   ------------------------------------
+   -- ada_set_config_pragmas_mapping --
+   ------------------------------------
+
+   procedure ada_set_config_pragmas_mapping
+     (Context        : ada_analysis_context;
+      Global_Pragmas : ada_analysis_unit;
+      Local_Pragmas  : access ada_analysis_unit)
+   is
+   begin
+      Clear_Last_Exception;
+
+      declare
+         Ctx      : constant Analysis_Context := Wrap_Context (Context);
+         Mappings : Config_Pragmas_Mapping;
+
+         type Unit_Array is array (Positive) of ada_analysis_unit;
+         LP : Unit_Array with Import, Address => Local_Pragmas.all'Address;
+         I  : Positive := 1;
+      begin
+         Mappings.Global_Pragmas := Wrap_Unit (Global_Pragmas);
+         while LP (I) /= null loop
+            declare
+               Key      : constant Analysis_Unit := Wrap_Unit (LP (I));
+               Value    : constant Analysis_Unit := Wrap_Unit (LP (I + 1));
+               Dummy    : Libadalang.Config_Pragmas.Unit_Maps.Cursor;
+               Inserted : Boolean;
+            begin
+               Mappings.Local_Pragmas.Insert (Key, Value, Dummy, Inserted);
+               if not Inserted then
+                  raise Precondition_Failure
+                    with "an analysis unit is present twice as a key";
+               end if;
+               I := I + 2;
+            end;
+         end loop;
+
+         Set_Mapping (Ctx, Mappings);
+      end;
+
+   exception
+      when Exc : others =>
+         Set_Last_Exception (Exc);
+   end ada_set_config_pragmas_mapping;
 
 end Libadalang.Implementation.C.Extensions;

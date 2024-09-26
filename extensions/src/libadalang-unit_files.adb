@@ -1,38 +1,20 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Ada.Strings.Maps;
 with Ada.Strings.Maps.Constants;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Wide_Wide_Characters.Handling;
 
-with GNATCOLL.Locks;
+with GNAT.Task_Lock;
+
 with GNATCOLL.Projects;
 with GNATCOLL.VFS; use GNATCOLL.VFS;
 
 with Langkit_Support.Text; use Langkit_Support.Text;
 
-with Libadalang.GPR_Lock;
 with Libadalang.Project_Provider;
 
 package body Libadalang.Unit_Files is
@@ -89,7 +71,7 @@ package body Libadalang.Unit_Files is
                      Lower : constant Wide_Wide_Character :=
                         Ada.Wide_Wide_Characters.Handling.To_Lower (C);
                   begin
-                     Append (Result, To_UTF8 ((1 => Lower)));
+                     Append (Result, To_UTF8 ([Lower]));
                   end;
             end case;
          end;
@@ -103,15 +85,23 @@ package body Libadalang.Unit_Files is
    --------------------
 
    function File_From_Unit
-     (Name : Text_Type; Kind : Analysis_Unit_Kind) return String
-   is
-      Dummy : GNATCOLL.Locks.Scoped_Lock (Libadalang.GPR_Lock.Lock'Access);
+     (Name : Text_Type; Kind : Analysis_Unit_Kind) return String is
    begin
-      return +GNATCOLL.Projects.File_From_Unit
+      GNAT.Task_Lock.Lock;
+
+      return Result : constant String := +GNATCOLL.Projects.File_From_Unit
         (GNATCOLL.Projects.No_Project,
          Unit_String_Name (Name),
          Libadalang.Project_Provider.Convert (Kind),
-         "ada");
+         "ada")
+      do
+         GNAT.Task_Lock.Unlock;
+      end return;
+
+   exception
+      when others =>
+         GNAT.Task_Lock.Unlock;
+         raise;
    end File_From_Unit;
 
 end Libadalang.Unit_Files;

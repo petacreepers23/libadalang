@@ -108,17 +108,19 @@ package body Xrefs is
    --------------------
 
    procedure Skip_Inst_Info (S : String; Cursor : in out Natural) is
-      Level : Natural := 0;
-      Dummy : Natural;
+      Level           : Natural := 0;
+      Dummy_Natural   : Natural;
+      Dummy_Character : Character;
    begin
       --  Skip generic instantiation information, if present
 
       while Cursor <= S'Last and then S (Cursor) = '[' loop
-         pragma Assert (Read_Character (S, Cursor) = '[');
-         Dummy := Read_Natural (S, Cursor);
+         Dummy_Character := Read_Character (S, Cursor);
+         pragma Assert (Dummy_Character = '[');
+         Dummy_Natural := Read_Natural (S, Cursor);
          if S (Cursor) = '|' then
             Cursor := Cursor + 1;
-            Dummy := Read_Natural (S, Cursor);
+            Dummy_Natural := Read_Natural (S, Cursor);
          end if;
          Level := Level + 1;
       end loop;
@@ -211,10 +213,18 @@ package body Xrefs is
             raise Program_Error;
          end if;
 
-         --  Ignore "end of spec/body" xrefs, which point on the ending
+         --  Ignore "end of spec/body" xrefs (e/t), which point on the ending
          --  semicolon of an entity body. LAL won't support that.
+         --
+         --  Ignore "first private entity" (E) xref, which points on the first
+         --  private entity of a given package.
+         --
+         --  Ignore "implicit reference" (i) xref (at least for now: we want
+         --  to support them in the future, see GitLab issue #1250).
 
-         if Current_Xrefs /= null and then Type_Char not in 'e' | 't' then
+         if Current_Xrefs /= null
+         and then Type_Char not in 'e' | 't' | 'E' | 'i'
+         then
             Current_Xrefs.Xrefs.Append
               (Xref_Type'(Ref_Sloc => (Line_Number (Line),
                                        Column_Number (Column)),
@@ -246,10 +256,19 @@ package body Xrefs is
                      Chunks   : constant Slice_Array := Split (Line);
                      Filename : constant String := Get (Line, Chunks (3));
                   begin
-                     Xrefs.Append (new Unit_Xrefs_Type'
-                                     (Unit  => File_Index (Files, Filename),
-                                      Xrefs => <>));
-                     Unit_Map.Insert (+Filename, Xrefs.Last_Index);
+                     if Unit_Map.Contains (+Filename) then
+                        --  If a package specification is a simple generic
+                        --  instantiation, the ALI file will contains two units
+                        --  associated to the same file: a body and a spec
+                        --  located in the ADS file. In that case, do not add
+                        --  it twice.
+                        null;
+                     else
+                        Xrefs.Append (new Unit_Xrefs_Type'
+                                       (Unit  => File_Index (Files, Filename),
+                                        Xrefs => <>));
+                        Unit_Map.Insert (+Filename, Xrefs.Last_Index);
+                     end if;
                   end;
 
                when 'D' =>
@@ -307,11 +326,13 @@ package body Xrefs is
                         --  is the actual xref data.
 
                         --  Skip the entity name (either regular identifier or
-                        --  "XXX")...
+                        --  "XXX" or 'X')...
                         if Line (Cursor) = '"' then
                            Cursor := Cursor + 1;
                            Skip_Until (Line, Cursor, '"');
                            Cursor := Cursor + 1;
+                        elsif Line (Cursor) = ''' then
+                           Cursor := Cursor + 3;
                         else
                            while
                              Cursor <= Line'Last
@@ -436,7 +457,9 @@ package body Xrefs is
             return False;
 
          else
-            return L_Xref.Ref_Sloc < R_Xref.Ref_Sloc;
+            return (if L_Xref.Ref_Sloc = R_Xref.Ref_Sloc
+                    then L_Xref.Entity_Sloc < R_Xref.Entity_Sloc
+                    else L_Xref.Ref_Sloc < R_Xref.Ref_Sloc);
          end if;
       end Before;
 

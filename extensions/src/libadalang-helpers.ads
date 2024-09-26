@@ -1,34 +1,16 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Ada.Containers.Vectors;
 with Ada.Exceptions;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
 with GNATCOLL.Opt_Parse;
-with GNATCOLL.Projects;  use GNATCOLL.Projects;
-with GNATCOLL.Traces;    use GNATCOLL.Traces;
-with GNATCOLL.Utils;     use GNATCOLL.Utils;
+with GNATCOLL.Traces; use GNATCOLL.Traces;
+with GNATCOLL.Utils;  use GNATCOLL.Utils;
+with GPR2.Project.Tree;
 
 with Libadalang.Project_Provider;
 with Libadalang.Analysis; use Libadalang.Analysis;
@@ -46,11 +28,10 @@ package Libadalang.Helpers is
      (Project_File             : String;
       Scenario_Vars            : Unbounded_String_Array := Empty_Array;
       Target, RTS, Config_File : String := "";
-      Project                  : out Project_Tree_Access;
-      Env                      : out Project_Environment_Access);
-   --  Load ``Project_File`` using scenario variables given in
+      Project                  : out GPR2.Project.Tree.Object;
+      Absent_Dir_Error         : GPR2.Error_Level := GPR2.Warning);
+   --  Load ``Project_File`` into ``Project`` using scenario variables given in
    --  ``Scenario_Vars``, and given ``Target``, ``RTS` and ``Config_File``.
-   --  Populate ``Project`` and ``Env`` accordingly.
    --
    --  ``Scenario_Vars`` should be an array of strings of the format
    --  ``<Var>=<Val>``. If the format is incorrect, ``Abort_App`` will be
@@ -59,26 +40,29 @@ package Libadalang.Helpers is
    --  If ``Config_File`` is not empty, then ``Target`` and ``RTS`` should be
    --  empty.
    --
-   --  See ``GNATCOLL.Projects.Set_Target_And_Runtime`` as well as
-   --  ``GNATCOLL.Projects.Set_Config_File`` for more details about the use of
-   --  ``Target``, ``RTS`` and ``Config_File``.
+   --  See ``GPR2.Options`` as well as for more details about the use of
+      --  ``Target``, ``RTS`` and ``Config_File``.
+   --
+   --   ``Absent_Dir_Error`` controls how missing output directories should be
+   --   reported.
 
    function Project_To_Provider
-     (Project : Project_Tree_Access) return Unit_Provider_Reference;
+     (Project : GPR2.Project.Tree.Object) return Unit_Provider_Reference;
    --  Try to create a unit provider out of ``Project``. If not possible, call
    --  ``Abort_App``.
 
    function Command_Line_Event_Handler
-     (Exit_On_Missing_File : Boolean) return Event_Handler_Reference;
+     (Keep_Going_On_Missing_File : Boolean) return Event_Handler_Reference;
    --  Create an event handler with default callbacks for command line
    --  applications.
    --
    --  When a dependency is not found, a warning or error will be emitted on
    --  the standard error stream.
    --
-   --  ``Exit_On_Missing_File`` will determine the behavior when
-   --  encountering a missing dependency. If ``False``, a warning will be shown
-   --  but resolution will continue. If ``True``, application will exit.
+   --  ``Keep_Going_On_Missing_File`` will determine the behavior when
+     --  encountering a missing dependency. If ``True``, a warning will be
+     --  shown but resolution will continue. If ``False``, application will
+     --  exit.
 
    procedure Abort_App (Message : String := "") with No_Return;
    --  If provided, print Message to the standard error output and abort the
@@ -89,7 +73,7 @@ package Libadalang.Helpers is
    --
    --  * Default (look in the current directory);
    --  * Project_File (from a GPR project file);
-   --  * Auto_dir (files in a list of directories).
+   --  * Auto_Dir (files in a list of directories).
 
    type Source_Provider_Kind is (Default, Project_File, Auto_Dir);
    type Source_Provider
@@ -99,7 +83,7 @@ package Libadalang.Helpers is
          when Default =>
             null;
          when Project_File =>
-            Project : GNATCOLL.Projects.Project_Tree_Access;
+            Project : GPR2.Project.Tree.Object;
          when Auto_Dir =>
             Dirs, Found_Files : String_Vectors.Vector;
       end case;
@@ -194,6 +178,10 @@ package Libadalang.Helpers is
       --  Finally, once all jobs are done, the main task calls
       --  App_Post_Process.
 
+      GPR_Absent_Dir_Warning : Boolean := True;
+      --  Whether missing directories in loaded GPR projects should be reported
+      --  as warnings, or ignored.
+
       with procedure App_Setup
         (Context : App_Context; Jobs : App_Job_Context_Array) is null;
       --  This procedure is called right after command line options are parsed,
@@ -235,8 +223,8 @@ package Libadalang.Helpers is
 
          package Charset is new Parse_Option
            (Parser, "-C", "--charset", "Charset to use for source decoding",
-            Unbounded_String,
-            Default_Val => To_Unbounded_String ("iso-8859-1"));
+            Arg_Type    => Unbounded_String,
+            Default_Val => Null_Unbounded_String);
 
          package Project_File is new Parse_Option
            (Parser, "-P", "--project",
@@ -244,10 +232,21 @@ package Libadalang.Helpers is
             Default_Val => Null_Unbounded_String,
             Help        => "Project file to use");
 
+         package Subprojects is new Parse_Option_List
+           (Parser,
+            Long       => "--subproject",
+            Arg_Type   => Unbounded_String,
+            Accumulate => True,
+            Help       =>
+              "If passed, list of subprojects in which to look for source"
+              & " files. If not passed, start from the root project only.");
+
          package Process_Full_Project_Tree is new Parse_Flag
            (Parser, "-U", "--recursive",
-            Help => "Process all units in the project tree, " &
-              "excluding externally built projects");
+            Help =>
+              "Process all units in the project tree, excluding externally"
+              & " built projects unless the --process-runtime option is also"
+              & " passed.");
 
          package Process_Runtime is new Parse_Flag
            (Parser, Long => "--process-runtime",
@@ -290,6 +289,22 @@ package Libadalang.Helpers is
                & " passed, the auto provider will be used, and project options"
                & " ignored");
 
+         package Preprocessor_Data_File is new Parse_Option
+           (Parser, Long => "--preprocessor-data-file",
+            Arg_Type    => Unbounded_String,
+            Default_Val => Null_Unbounded_String,
+            Help        =>
+              "Filename for the preprocessor data file (enables"
+              & " preprocessing).");
+
+         package Preprocessor_Path is new Parse_Option_List
+           (Parser, Long => "--preprocessor-path",
+            Arg_Type    => Unbounded_String,
+            Accumulate  => True,
+            Help        =>
+              "Directory name to consider when looking for preprocessor"
+              & " definition files.");
+
          package Jobs is new Parse_Option
            (Parser, "-j", "--jobs",
             Arg_Type    => Natural,
@@ -306,12 +321,20 @@ package Libadalang.Helpers is
            (Parser, Long => "--symbolic-traceback",
             Help         => "Show symbolic tracebacks for exceptions");
 
-         package Exit_On_Missing_File is new Parse_Flag
+         package Keep_Going_On_Missing_File is new Parse_Flag
            (Parser,
-            Short => "-E", Long => "--exit-on-missing-file",
+            Short => "-k", Long => "--keep-going-on-missing-file",
             Help  => "Behavior when encountering missing files. By default,"
-            & " continue despite missing dependencies. If passed, exit on"
-            & " first missing file.");
+                     & " exit with an error on the first missing dependency."
+                     & " Continue with a warning in the option is passed.");
+
+         package Sort_By_Basename is new Parse_Flag
+           (Parser,
+            Long => "--sort-by-basename",
+            Help => "Process source files sorted by basename. This is useful"
+                    & " in order to get outputs that do not vary depending on"
+                    & " where the source files are installed on the file"
+                    & " system.");
 
          package Files is new Parse_Positional_Arg_List
            (Parser,

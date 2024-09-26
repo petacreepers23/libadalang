@@ -1,0 +1,69 @@
+## vim: ft=makojava
+
+<%
+nat = c_api.get_name
+%>
+
+    // --- Project manager functions
+
+    /**
+     * Function to load a GPR project.
+     *
+     * @param diagnostics The list of diagnostics emitted during the project
+     *     opening. Will be filled by this function call.
+     */
+    @CompilerDirectives.TruffleBoundary
+    public static native PointerWrapper ${nat("gpr_project_load")}(
+        String projectFile,
+        ScenarioVariable[] scenarioVariables,
+        String target,
+        String runtime,
+        String configFile,
+        List<String> diagnostics
+    );
+
+    /** Free the given project */
+    @CompilerDirectives.TruffleBoundary
+    public static native void ${nat("gpr_project_free")}(
+        ProjectManager project
+    );
+
+    /** Get the unit provider for the given project */
+    @CompilerDirectives.TruffleBoundary
+    public static native UnitProvider ${nat("gpr_project_create_unit_provider")}(
+        ProjectManager project,
+        String subproject
+    );
+
+    /** Get the source file array for the given project */
+    @CompilerDirectives.TruffleBoundary
+    public static native String[] ${nat("gpr_project_source_files")}(
+        ProjectManager project,
+        int mode,
+        String[] subprojects
+    );
+
+    ${java_doc("libadalang.gpr_project_create_context", 4)}
+    public static native AnalysisContext ${nat("gpr_project_create_context")}(
+        ProjectManager project,
+        String subproject,
+        EventHandler eventHandler,
+        boolean withTrivia,
+        int tabStop
+    );
+
+    /** Create an auto provider reference */
+    @CompilerDirectives.TruffleBoundary
+    public static native UnitProvider ${nat("create_auto_provider")}(
+        String[] sourceFiles,
+        String charset
+    );
+
+    // --- Config pragmas
+
+    @CompilerDirectives.TruffleBoundary
+    public static native void ${nat("set_config_pragmas_mapping")}(
+        AnalysisContext context,
+        AnalysisUnit globalPragmas,
+        AnalysisUnit[] localPragmas
+    );

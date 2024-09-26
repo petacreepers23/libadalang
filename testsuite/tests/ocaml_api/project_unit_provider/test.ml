@@ -1,5 +1,11 @@
 open Libadalang
 
+let value_exn = function
+  | Some x ->
+      x
+  | None ->
+      raise (Invalid_argument "Some expected, got None")
+
 let format_exc_message msg =
   (* For exceptions with no explicit message (e.g. Invalid_Project exceptions
    * from gnatcoll-projects.adb), hide the line number, which is out of our
@@ -14,16 +20,16 @@ let () =
         ?(runtime = "")
         project_file
   =
-    try ignore (UnitProvider.for_project
-                  ~project:project
+    try ignore (GPRProject.load
                   ~scenario_vars:scenario_vars
                   ~target:target
                   ~runtime:runtime
-                  project_file : UnitProvider.t)
+                  project_file |> GPRProject.create_unit_provider ~project : UnitProvider.t) ;
     (* These exceptions come from GNATCOLL and contain no message but a
      *  reference to a sloc in gnatcoll-project.adb, so not worth testing. *)
-    with InvalidProject s ->
-      Format.printf "@[<v>got InvalidProject %s@ @ @]" (format_exc_message s)
+    with
+      | ProjectError s ->
+        Format.printf "@[<v>got ProjectError %s@ @ @]" (format_exc_message s)
   in
   (* Try to load a project file that is not valid *)
   load_project "invalid.gpr" ;
@@ -35,12 +41,23 @@ let () =
     ~scenario_vars:[("SRC_DIR", "src1")]
     "p.gpr"
 
+(* Test loading GPR files with unavailable toolchain *)
+let () =
+  let check ada_only =
+    ignore (GPRProject.load ~ada_only:ada_only "foo.gpr");
+  in
+    Format.printf "@[<v>foo.gpr: All languages@ @]";
+    check false;
+    Format.printf "@[<v>foo.gpr: Ada only@ @]";
+    check true
+
 (* Test that the unit provider correclty works and Libadalang is able to
  * get the reference of a node that is declared in another unit *)
 
 let test_src src_dir =
   let unit_provider =
-    UnitProvider.for_project ~scenario_vars:[("SRC_DIR", src_dir)] "p.gpr"
+    GPRProject.(load ~scenario_vars:[("SRC_DIR", src_dir)] "p.gpr"
+                |> create_unit_provider)
   in
   let ctx = AnalysisContext.create ~unit_provider () in
   let filename = "p2.ads" in
@@ -67,4 +84,37 @@ let test_src src_dir =
     (Format.pp_print_list pp_node)
     matching_nodes
 
-let () = test_src "src1" ; test_src "src2"
+let analysis_context () =
+  let open GPRProject in
+  let gpr = load ~scenario_vars:[("SRC_DIR", "src3")] "p.gpr" in
+  create_analysis_context gpr
+
+let test_gpr_project_context () =
+  let ctx = analysis_context () in
+  (* At this point gpr is out of scope, call GC.full_major to hopefully trigger
+     a valgrind issue in case gpr has been gced (we want it to stay alive
+     because the context uses it *)
+  Gc.full_major () ;
+  let u = AnalysisContext.get_from_file ctx "src3/a.ads" in
+  let root =
+    match AnalysisUnit.root u with
+    | Some n ->
+        n
+    | None ->
+        Format.printf "@[<v>Cannot get root node for file a.ads@ @]" ;
+        exit 1
+  in
+  let name =
+    AdaNode.find ObjectDecl root
+    |> ObjectDecl.f_default_expr
+    |> value_exn
+    |> AdaNode.as_a Name
+    |> value_exn
+  in
+  let ref = Name.p_referenced_decl name |> value_exn in
+  Format.printf "%s referenced_decl is %s@."
+    (AdaNode.image name)
+    (AdaNode.image ref)
+
+
+let () = test_src "src1" ; test_src "src2"; test_gpr_project_context ()

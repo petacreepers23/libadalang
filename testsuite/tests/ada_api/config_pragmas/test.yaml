@@ -1,0 +1,7 @@
+driver: ada-api
+main:
+  - invalid.adb
+  - projects.adb
+  - sources.adb
+control:
+    - [XFAIL, "valgrind", "W320-022: GNATCOLL.Projects leaks no longer fixed"]

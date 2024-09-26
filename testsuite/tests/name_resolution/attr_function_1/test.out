@@ -1,0 +1,93 @@
+Analyzing test.adb
+##################
+
+Resolving xrefs for node <ObjectDecl ["X"] test.adb:4:4-4:48>
+*************************************************************
+
+Expr: <DottedName test.adb:4:8-4:22>
+  references:    system.address
+  type:          None
+  expected type: None
+Expr: <Id "System" test.adb:4:8-4:14>
+  references:    system
+  type:          None
+  expected type: None
+Expr: <Id "Address" test.adb:4:15-4:22>
+  references:    system.address
+  type:          None
+  expected type: None
+Expr: <CallExpr test.adb:4:26-4:47>
+  references:    system.storage_elements.to_address((system.storage_elements.integer_address) -> system.address)
+  type:          system.address
+  expected type: system.address
+Expr: <AttributeRef test.adb:4:26-4:43>
+  references:    system.storage_elements.to_address((system.storage_elements.integer_address) -> system.address)
+  type:          None
+  expected type: None
+Expr: <Id "System" test.adb:4:26-4:32>
+  references:    system
+  type:          None
+  expected type: None
+Expr: <Id "To_Address" test.adb:4:33-4:43>
+  references:    None
+  type:          None
+  expected type: None
+Expr: <Int test.adb:4:45-4:46>
+  references:    None
+  type:          standard.universal_int_type_
+  expected type: system.storage_elements.integer_address
+
+Resolving xrefs for node <GenericPackageInstantiation ["My_Pkg_To_Address"] test.adb:14:4-17:26>
+************************************************************************************************
+
+Expr: <Id "Pkg_G" test.adb:14:37-14:42>
+  references:    test().pkg_g
+  type:          None
+  expected type: None
+Expr: <DottedName test.adb:15:7-15:46>
+  references:    system.storage_elements.integer_address
+  type:          None
+  expected type: None
+Expr: <DottedName test.adb:15:7-15:30>
+  references:    system.storage_elements
+  type:          None
+  expected type: None
+Expr: <Id "System" test.adb:15:7-15:13>
+  references:    system
+  type:          None
+  expected type: None
+Expr: <Id "Storage_Elements" test.adb:15:14-15:30>
+  references:    system.storage_elements
+  type:          None
+  expected type: None
+Expr: <Id "Integer_Address" test.adb:15:31-15:46>
+  references:    system.storage_elements.integer_address
+  type:          None
+  expected type: None
+Expr: <DottedName test.adb:16:7-16:21>
+  references:    system.address
+  type:          None
+  expected type: None
+Expr: <Id "System" test.adb:16:7-16:13>
+  references:    system
+  type:          None
+  expected type: None
+Expr: <Id "Address" test.adb:16:14-16:21>
+  references:    system.address
+  type:          None
+  expected type: None
+Expr: <AttributeRef test.adb:17:7-17:24>
+  references:    system.storage_elements.to_address((system.storage_elements.integer_address) -> system.address)
+  type:          None
+  expected type: None
+Expr: <Id "System" test.adb:17:7-17:13>
+  references:    system
+  type:          None
+  expected type: None
+Expr: <Id "To_Address" test.adb:17:14-17:24>
+  references:    None
+  type:          None
+  expected type: None
+
+
+Done.

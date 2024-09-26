@@ -3,8 +3,8 @@
 
 with Ada.Text_IO;
 
-with Langkit_Support.Text, Libadalang.Analysis, Libadalang.Iterators,
-     Libadalang.Rewriting;
+with Langkit_Support.Text, Libadalang.Analysis, Libadalang.Common,
+     Libadalang.Iterators, Libadalang.Rewriting;
 
 with Helpers;
 
@@ -12,10 +12,11 @@ procedure Rewrite_Self_Arg is
 
    package TIO renames Ada.Text_IO;
    package LAL renames Libadalang.Analysis;
+   package LALCO renames Libadalang.Common;
    package LAL_RW renames Libadalang.Rewriting;
    package LAL_It renames Libadalang.Iterators;
 
-   use type LAL.Ada_Node_Kind_Type;
+   use type LALCO.Ada_Node_Kind_Type;
 
    Units : Helpers.Unit_Vectors.Vector;
 
@@ -25,7 +26,7 @@ procedure Rewrite_Self_Arg is
    Handle : LAL_RW.Rewriting_Handle := LAL_RW.Start_Rewriting (Ctx);
 
    function Is_Subp (N : LAL.Ada_Node) return Boolean is
-     (LAL.Kind (N) = LAL.Ada_Subp_Spec);
+     (LAL.Kind (N) = LALCO.Ada_Subp_Spec);
 
 begin
 
@@ -40,12 +41,12 @@ begin
             Primitive_Of : LAL.Base_Type_Decl;
             --  Subp_Spec is a primitive of this
 
-            Id        : LAL_RW.Node_Rewriting_Handle
+            Id : LAL_RW.Node_Rewriting_Handle
               := LAL_RW.No_Node_Rewriting_Handle;
             --  Formal identifier to rewrite into Self
          begin
 
-            Primitive_Of := Subp_Spec.P_Primitive_Subp_Of;
+            Primitive_Of := Subp_Spec.P_Primitive_Subp_Types (1);
 
             if not Primitive_Of.Is_Null
               and then not Subp_Spec.F_Subp_Params.Is_Null
@@ -86,21 +87,28 @@ begin
    --  Write results
 
    declare
-      Units : constant LAL_RW.Unit_Rewriting_Handle_Array
-        := LAL_RW.Unit_Handles (Handle);
-      --  Remember which analysis units are to be rewritten
-
-      Result : constant LAL_RW.Apply_Result := LAL_RW.Apply (Handle);
+      Units  : Helpers.Unit_Vectors.Vector;
+      Result : LAL_RW.Apply_Result;
    begin
+      --  Remember which analysis units are to be rewritten. Keep track of them
+      --  using Analysis_Unit values, since the call to LAL_RW.Apply will make
+      --  all rewriting handles invalid.
+
+      for Unit_Handle of LAL_RW.Unit_Handles (Handle) loop
+         Units.Append (LAL_RW.Unit (Unit_Handle));
+      end loop;
+
+      Result := LAL_RW.Apply (Handle);
+
       if not Result.Success then
          TIO.Put_Line ("Error during rewriting...");
       end if;
 
       --  Go through all rewritten units and generate a ".new" source file to
       --  contain the rewritten sources.
-      for Unit_Handle of Units loop
+
+      for U of Units loop
          declare
-            U        : constant LAL.Analysis_Unit := LAL_RW.Unit (Unit_Handle);
             Filename : constant String := LAL.Get_Filename (U) & ".new";
             Charset  : constant String := LAL.Get_Charset (U);
 
@@ -109,7 +117,7 @@ begin
             Content_Text  : constant Langkit_Support.Text.Text_Type :=
               LAL.Text (U);
             Content_Bytes : constant String :=
-              Langkit_Support.Text.Transcode (Content_Text, Charset);
+              Langkit_Support.Text.Encode (Content_Text, Charset);
 
             Output_File : TIO.File_Type;
          begin

@@ -1,25 +1,7 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Libadalang.Implementation;    use Libadalang.Implementation;
 with Libadalang.Public_Converters; use Libadalang.Public_Converters;
@@ -37,7 +19,7 @@ package body Libadalang.Iterators.Extensions is
            (Size    => Name'Length,
             Name    => Name,
             Context => No_Analysis_Context,
-            Symbol  => null));
+            Symbol  => No_Symbol));
       end return;
    end Decl_Defines;
 
@@ -48,8 +30,6 @@ package body Libadalang.Iterators.Extensions is
    overriding function Evaluate
      (P : in out Decl_Defines_Predicate; N : Ada_Node) return Boolean
    is
-      use type Langkit_Support.Symbols.Symbol_Type;
-
       function Check_Base_Id (Id : Base_Id) return Boolean
       is (Single_Tok_Node_P_Sym (Unwrap_Node (Id)) = P.Symbol);
       --  Return whether the symbol for Id matches P.Name
@@ -71,24 +51,26 @@ package body Libadalang.Iterators.Extensions is
 
       --  Look for at least one defining name that matches the expected name
       for Def_Name of N.As_Basic_Decl.P_Defining_Names loop
-         declare
-            N : constant Name := Def_Name.F_Name;
-         begin
-            case N.Kind is
-               when Ada_Identifier | Ada_String_Literal =>
-                  if Check_Base_Id (N.As_Base_Id) then
-                     return True;
-                  end if;
+         if not Def_Name.Is_Null then
+            declare
+               N : constant Name := Def_Name.F_Name;
+            begin
+               case N.Kind is
+                  when Ada_Identifier | Ada_String_Literal =>
+                     if Check_Base_Id (N.As_Base_Id) then
+                        return True;
+                     end if;
 
-               when Ada_Dotted_Name =>
-                  if Check_Base_Id (N.As_Dotted_Name.F_Suffix) then
-                     return True;
-                  end if;
+                  when Ada_Dotted_Name =>
+                     if Check_Base_Id (N.As_Dotted_Name.F_Suffix) then
+                        return True;
+                     end if;
 
-               when others =>
-                  null;
-            end case;
-         end;
+                  when others =>
+                     null;
+               end case;
+            end;
+         end if;
       end loop;
 
       return False;
@@ -118,7 +100,7 @@ package body Libadalang.Iterators.Extensions is
       return not N.Is_Null
              and then N.P_Gnat_Xref (P.Imprecise_Fallback) = P.Name;
    exception
-      when Property_Error =>
+      when Precondition_Failure | Property_Error =>
          return False;
    end Evaluate;
 

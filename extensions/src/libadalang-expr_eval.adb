@@ -1,28 +1,12 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Ada.Exceptions;
 with Ada.Strings.Wide_Wide_Unbounded; use Ada.Strings.Wide_Wide_Unbounded;
+
+with GNATCOLL.GMP.Integers.Misc;
 
 with Libadalang.Analysis; use Libadalang.Analysis;
 with Libadalang.Common;   use Libadalang.Common;
@@ -31,6 +15,7 @@ with Libadalang.Sources;  use Libadalang.Sources;
 package body Libadalang.Expr_Eval is
 
    use type GNATCOLL.GMP.Integers.Big_Integer;
+   use type GNATCOLL.GMP.Rational_Numbers.Rational;
 
    function "+" (S : Wide_Wide_String) return Unbounded_Wide_Wide_String
                  renames To_Unbounded_Wide_Wide_String;
@@ -50,13 +35,13 @@ package body Libadalang.Expr_Eval is
 
    function Create_Real_Result
      (Expr_Type  : LAL.Base_Type_Decl;
-      Value      : Long_Float) return Eval_Result;
+      Value      : Rational) return Eval_Result;
    --  Helper to create Eval_Result values to wrap real numbers
 
    function Create_Bool_Result
      (Value : Boolean; N : LAL.Ada_Node'Class) return Eval_Result;
    --  Helper to create an Eval_Result with Enum_Lit_Kind which denotes
-   --  the standard True or False literal decls from the standart Boolean
+   --  the standard True or False literal decls from the standard Boolean
    --  type.
    --  todo: N is only used to access the fake free function P_Std_Entity.
 
@@ -79,6 +64,29 @@ package body Libadalang.Expr_Eval is
    function As_Bool (Self : Eval_Result) return Boolean;
    --  Return ``Self`` as a Boolean, if it is indeed of type
    --  ``Standard.Boolean``.
+
+   function Is_Std_Char_Type (Node : LAL.Base_Type_Decl) return Boolean;
+   --  Return whether ``Node`` is a standard character type
+
+   ----------------------
+   -- Is_Std_Char_Type --
+   ----------------------
+
+   function Is_Std_Char_Type (Node : LAL.Base_Type_Decl) return Boolean is
+   begin
+      --  Note: The condition below was previously implemented with
+      --  a membership expression ``Node_Type in Std_Char_Type | ...``
+      --  but Ada specifies that the predefined `"="` operator must be
+      --  used in that case even if user-defined operator hides it.
+      --  However, the predefined operator is too strict for us in
+      --  this case: we want the comparison to discard irrelevant
+      --  metadata (like how the node was retrieved) and so need to
+      --  make sure the custom equality operators are called instead.
+
+      return (Node = Node.P_Std_Char_Type
+              or else Node = Node.P_Std_Wide_Char_Type
+              or else Node = Node.P_Std_Wide_Wide_Char_Type);
+   end Is_Std_Char_Type;
 
    ------------------------
    -- Create_Enum_Result --
@@ -122,9 +130,13 @@ package body Libadalang.Expr_Eval is
 
    function Create_Real_Result
      (Expr_Type  : LAL.Base_Type_Decl;
-      Value      : Long_Float) return Eval_Result is
+      Value      : Rational) return Eval_Result is
    begin
-      return ((Kind => Real, Expr_Type => Expr_Type, Real_Result => Value));
+      return Result : Eval_Result :=
+        (Kind => Real, Expr_Type => Expr_Type, Real_Result => <>)
+      do
+         Result.Real_Result.Set (Value);
+      end return;
    end Create_Real_Result;
 
    ------------------------------
@@ -164,7 +176,7 @@ package body Libadalang.Expr_Eval is
       Bool_Type : constant LAL.Base_Type_Decl :=
          N.P_Std_Entity (+"Boolean").As_Base_Type_Decl;
    begin
-      --  Get the enumerator value declaration correspnoding to
+      --  Get the enumerator value declaration corresponding to
       --  Result in Standard's Boolean.
       return Create_Enum_Result
         (Bool_Type,
@@ -178,7 +190,6 @@ package body Libadalang.Expr_Eval is
 
    procedure Raise_To_N (Left, Right : Big_Integer; Result : out Big_Integer)
    is
-      use GNATCOLL.GMP;
       N : Unsigned_Long;
    begin
       if Right < 0 then
@@ -213,7 +224,7 @@ package body Libadalang.Expr_Eval is
 
    function Expr_Eval (E : LAL.Expr) return Eval_Result is
    begin
-      return Expr_Eval_In_Env (E, (1 .. 0 => <>));
+      return Expr_Eval_In_Env (E, [1 .. 0 => <>]);
    end Expr_Eval;
 
    ----------------------
@@ -232,6 +243,18 @@ package body Libadalang.Expr_Eval is
       function Eval_Range_Attr
         (D : LAL.Ada_Node; A : Range_Attr) return Eval_Result;
       --  Helper to evaluate a 'First or 'Last attribute reference
+
+      function Eval_Function_Attr
+        (AR : LAL.Attribute_Ref; Args : LAL.Assoc_List) return Eval_Result;
+      --  Helper to evaluate function attribute references
+
+      function Eval_Array_Index
+        (Call_Expr : LAL.Call_Expr; Index : LAL.Expr) return Eval_Result;
+      --  Helper to evaluate array indexes
+
+      function Eval_Array_Slice
+        (Call_Expr : LAL.Call_Expr; Bounds : LAL.Bin_Op) return Eval_Result;
+      --  Helper to evaluate function attribute references
 
       function Expr_Eval (E : LAL.Expr) return Eval_Result;
       --  Helper to evaluate the given expr in the current environment. Note
@@ -266,6 +289,13 @@ package body Libadalang.Expr_Eval is
                        D.As_Enum_Literal_Decl.P_Enum_Type.As_Base_Type_Decl,
                        D.As_Enum_Literal_Decl);
 
+            when Ada_Synthetic_Char_Enum_Lit =>
+
+               --  A synthesized character enum declaration evaluates to the
+               --  evaluation of its expression.
+               return Expr_Eval
+                 (D.As_Synthetic_Char_Enum_Lit.P_Expr.As_Expr);
+
             when Ada_Number_Decl =>
 
                --  A number declaration evaluates to the evaluation of its
@@ -286,6 +316,9 @@ package body Libadalang.Expr_Eval is
 
             when Ada_Anonymous_Expr_Decl =>
                return Expr_Eval (D.As_Anonymous_Expr_Decl.F_Expr);
+
+            when Ada_Synthetic_Object_Decl =>
+               return Eval_Decl (D.Parent.As_Basic_Decl);
 
             when others =>
                raise Property_Error
@@ -368,8 +401,41 @@ package body Libadalang.Expr_Eval is
                     (case A is
                      when Range_First => Lits.First_Child_Index,
                      when Range_Last  => Lits.Last_Child_Index);
+                  Char_Pos  : Natural;
                begin
-                  return Eval_Decl (Lits.Child (Lit_Index).As_Basic_Decl);
+                  if Is_Std_Char_Type (D.Parent.As_Base_Type_Decl) then
+                     --  Due to how we define the Character type in our
+                     --  artifical __standard unit (and its
+                     --  Wide_Character and Wide_Wide_Character
+                     --  variants), the 'First and 'Last attributes cannot
+                     --  return an Enum_Literal_Decl since they are not
+                     --  defined. In order to not fail the Eval_As_Int
+                     --  function, we return the corresponding Integer
+                     --  value instead.
+                     Char_Pos :=
+                       (case A is
+                        when Range_First =>
+                           Support.Text.Character_Type'Pos
+                           (Support.Text.Character_Type'First),
+                        when Range_Last  =>
+                          (if D.P_Std_Char_Type
+                              .As_Base_Type_Decl = D.Parent.As_Base_Type_Decl
+                           then
+                              Character'Pos (Character'Last)
+                           elsif D.P_Std_Wide_Char_Type
+                                 .As_Base_Type_Decl =
+                                 D.Parent.As_Base_Type_Decl
+                           then
+                              Wide_Character'Pos (Wide_Character'Last)
+                           else
+                              Support.Text.Character_Type'Pos
+                              (Support.Text.Character_Type'Last)));
+
+                     return Create_Int_Result (D.Parent.As_Base_Type_Decl,
+                                               Char_Pos);
+                  else
+                     return Eval_Decl (Lits.Child (Lit_Index).As_Basic_Decl);
+                  end if;
                end;
             when Ada_Decimal_Fixed_Point_Def =>
                declare
@@ -387,9 +453,9 @@ package body Libadalang.Expr_Eval is
                         Delta_Res : constant Eval_Result :=
                            Expr_Eval (Def.F_Delta);
 
-                        Delta_Val : constant Long_Float :=
+                        Delta_Val : constant Double :=
                           (if Delta_Res.Kind in Real
-                           then Delta_Res.Real_Result
+                           then Delta_Res.Real_Result.To_Double
                            else raise Property_Error with
                               "delta must be real");
 
@@ -402,19 +468,22 @@ package body Libadalang.Expr_Eval is
                            else raise Property_Error with
                               "digits must be an integer");
 
-                        Bound : constant Long_Float :=
+                        Bound : constant Double :=
                           (if Digits_Val > 0 and Delta_Val > 0.0
                            then (10.0 ** Digits_Val - 1.0) * Delta_Val
                            else raise Property_Error with
                               "delta and digits must be positive");
                      begin
-                        return
+                        return Result : Eval_Result :=
                           (Kind        => Real,
                            Expr_Type   => D.Parent.As_Base_Type_Decl,
-                           Real_Result =>
+                           Real_Result => <>)
+                        do
+                           Result.Real_Result.Set
                              (case A is
                               when Range_First => -Bound,
-                              when Range_Last => Bound));
+                              when Range_Last => Bound);
+                        end return;
                      end;
                   else
                      return Eval_Range_Attr (Rng.F_Range.As_Ada_Node, A);
@@ -424,6 +493,48 @@ package body Libadalang.Expr_Eval is
                return Eval_Range_Attr
                  (D.As_Ordinary_Fixed_Point_Def.F_Range.F_Range.As_Ada_Node,
                   A);
+            when Ada_Floating_Point_Def =>
+               declare
+                  Def : constant LAL.Floating_Point_Def :=
+                     D.As_Floating_Point_Def;
+
+                  Rng : constant LAL.Range_Spec := Def.F_Range;
+               begin
+                  --  If a range has been specified we simply recurse on it,
+                  --  otherwise we need to manually compute its bounds using
+                  --  the `digits` value specified for that type definition.
+                  if Rng.Is_Null then
+                     declare
+                        Digits_Res : constant Eval_Result :=
+                           Expr_Eval (Def.F_Num_Digits);
+
+                        Digits_Val : constant Integer :=
+                          (if Digits_Res.Kind in Int
+                           then To_Integer (Digits_Res.Int_Result)
+                           else raise Property_Error with
+                              "digits must be an integer");
+
+                        Bound : constant Double :=
+                          (if Digits_Val > 0
+                           then (10.0 ** (4 * Digits_Val))
+                           else raise Property_Error with
+                              "digits must be positive");
+                     begin
+                        return Result : Eval_Result :=
+                          (Kind        => Real,
+                           Expr_Type   => D.Parent.As_Base_Type_Decl,
+                           Real_Result => <>)
+                        do
+                           Result.Real_Result.Set
+                             (case A is
+                              when Range_First => -Bound,
+                              when Range_Last => Bound);
+                        end return;
+                     end;
+                  else
+                     return Eval_Range_Attr (Rng.F_Range.As_Ada_Node, A);
+                  end if;
+               end;
 
             when others =>
                raise Property_Error with
@@ -431,11 +542,351 @@ package body Libadalang.Expr_Eval is
                   & D.Kind'Image;
             end case;
 
+         when Ada_Object_Decl =>
+            declare
+               Val    : constant Eval_Result := Eval_Decl (D.As_Basic_Decl);
+               Typ    : constant LAL.Base_Type_Decl :=
+                  D.As_Object_Decl.P_Type_Expression.P_Designated_Type_Decl;
+               Result : Big_Integer;
+            begin
+               if Val.Kind /= String_Lit then
+                  raise Property_Error with
+                    "Cannot eval " & A'Image & " on " & Val.Kind'Image;
+               end if;
+
+               case A is
+               when Range_First => Result.Set (GNATCOLL.GMP.Long (Val.First));
+               when Range_Last => Result.Set (GNATCOLL.GMP.Long (Val.Last));
+               end case;
+
+               return Create_Int_Result (Typ, Result);
+            end;
+
          when others =>
             raise Property_Error with
                "Cannot eval " & A'Image & " attribute of " & D.Kind'Image;
          end case;
       end Eval_Range_Attr;
+
+      ------------------------
+      -- Eval_Function_Attr --
+      ------------------------
+
+      function Eval_Function_Attr
+        (AR : LAL.Attribute_Ref; Args : LAL.Assoc_List) return Eval_Result
+      is
+         Attr : constant LAL.Identifier := AR.F_Attribute;
+         Name : constant Wide_Wide_String :=
+            Canonicalize (Attr.Text).Symbol;
+      begin
+         if Name in "min" | "max" then
+            if Args.Is_Null or else Args.Children_Count /= 2 then
+               raise Property_Error with
+                  "'Min/'Max require exactly two arguments";
+            end if;
+
+            declare
+               Typ   : constant Base_Type_Decl :=
+                 AR.F_Prefix.P_Name_Designated_Type;
+               Val_1 : constant Eval_Result :=
+                 Expr_Eval (Args.Child (1).As_Param_Assoc.F_R_Expr);
+               Val_2 : constant Eval_Result :=
+                 Expr_Eval (Args.Child (2).As_Param_Assoc.F_R_Expr);
+            begin
+               if Val_1.Kind /= Val_2.Kind then
+                  raise Property_Error with
+                     "Inconsistent inputs for 'Min/'Max";
+               end if;
+
+               case Val_1.Kind is
+                  when Int =>
+                     if Name = "min" then
+                        return Create_Int_Result
+                          (Typ,
+                           Eval_Result'
+                             (if Val_1.Int_Result < Val_2.Int_Result
+                              then Val_1 else Val_2).Int_Result);
+                     else
+                        return Create_Int_Result
+                          (Typ,
+                           Eval_Result'
+                             (if Val_1.Int_Result > Val_2.Int_Result
+                              then Val_1 else Val_2).Int_Result);
+                     end if;
+                  when Real =>
+                     if Name = "min" then
+                        return Create_Real_Result
+                          (Typ,
+                           Eval_Result'
+                             (if Val_1.Real_Result < Val_2.Real_Result
+                              then Val_1 else Val_2).Real_Result);
+                     else
+                        return Create_Real_Result
+                          (Typ,
+                           Eval_Result'
+                             (if Val_1.Real_Result > Val_2.Real_Result
+                              then Val_1 else Val_2).Real_Result);
+                     end if;
+                  when others =>
+                     raise Property_Error with
+                        "'Min/'Max not applicable on enum types";
+               end case;
+            end;
+         elsif Name in "succ" | "pred" then
+            if Args.Is_Null or else Args.Children_Count /= 1 then
+               raise Property_Error with
+                  "'Pred/'Succ require exactly one argument";
+            end if;
+
+            declare
+               Typ      : constant Base_Type_Decl :=
+                 AR.F_Prefix.P_Name_Designated_Type;
+               Val      : constant Eval_Result :=
+                 Expr_Eval (Args.Child (1).As_Param_Assoc.F_R_Expr);
+               Enum_Val : Enum_Literal_Decl;
+            begin
+               case Val.Kind is
+               when Int =>
+                  --  TODO??? Properly handle modular types
+                  return Create_Int_Result
+                    (Typ,
+                     (if Name = "succ"
+                      then Val.Int_Result + 1
+                      else Val.Int_Result - 1));
+               when Real =>
+                  raise Property_Error with
+                     "'Pred/'Succ not applicable to reals";
+               when others =>
+                  Enum_Val := Ada_Node'
+                    (if Name = "succ"
+                     then Val.Enum_Result.Next_Sibling
+                     else Val.Enum_Result.Previous_Sibling)
+                    .As_Enum_Literal_Decl;
+
+                  if Enum_Val.Is_Null then
+                     raise Property_Error with
+                       "out of bounds 'Pred/'Succ on enum";
+                  end if;
+                  return Create_Enum_Result (Typ, Enum_Val);
+               end case;
+            end;
+         elsif Name in "val" then
+            if Args.Is_Null or Args.Children_Count /= 1 then
+               raise Property_Error with
+                  "'Val require exactly one argument";
+            end if;
+
+            declare
+               Typ      : constant Base_Type_Decl :=
+                 AR.F_Prefix.P_Name_Designated_Type;
+               Val      : constant Eval_Result :=
+                 Expr_Eval (Args.Child (1).As_Param_Assoc.F_R_Expr);
+            begin
+               if Val.Kind /= Int then
+                  raise Property_Error with
+                     "'Val expects an integer argument";
+               end if;
+
+               if Typ.P_Is_Int_Type then
+                  return Create_Int_Result (Typ, Val.Int_Result);
+               elsif Typ.P_Is_Enum_Type then
+                  declare
+                     Index : constant Integer :=
+                        To_Integer (Val.Int_Result);
+
+                     Enum_Val : Enum_Literal_Decl :=
+                        No_Enum_Literal_Decl;
+
+                     Root_Type : constant LAL.Base_Type_Decl :=
+                        Typ.P_Root_Type;
+                  begin
+                     if Index > -1 then
+                        if (Index <= Character'Pos (Character'Last)
+                            and then Root_Type = Typ.P_Std_Char_Type)
+                          or else (Index <= Wide_Character'Pos
+                                            (Wide_Character'Last)
+                                   and then Root_Type =
+                                            Typ.P_Std_Wide_Char_Type)
+                          or else Root_Type = Typ.P_Std_Wide_Wide_Char_Type
+                          --  Do not need to check for Wide_Wide_Character'Last
+                          --  here, a runtime exception will be raised if Index
+                          --  is out of range.
+                        then
+                           --  Due to how we define the Character type in our
+                           --  artifical __standard unit (and its
+                           --  Wide_Character and Wide_Wide_Character
+                           --  variants), the 'Val attribute cannot return an
+                           --  Enum_Literal_Decl since they are not defined. In
+                           --  order to not fail the Eval_As_Int function, we
+                           --  return the corresponding Integer value instead.
+                           return Create_Int_Result (Typ, Val.Int_Result);
+                        end if;
+
+                        Enum_Val := Child
+                           (Root_Type.As_Type_Decl.F_Type_Def.As_Enum_Type_Def
+                            .F_Enum_Literals, Index + 1).As_Enum_Literal_Decl;
+                     end if;
+
+                     if Enum_Val.Is_Null then
+                        raise Property_Error with
+                          "out of bounds 'Val on enum";
+                     end if;
+
+                     return Create_Enum_Result (Typ, Enum_Val);
+                  end;
+               else
+                  raise Property_Error with
+                     "'Val only applicable to scalar types";
+               end if;
+            end;
+         elsif Name in "pos" then
+            if Args.Is_Null or Args.Children_Count /= 1 then
+               raise Property_Error with
+                  "'Pos require exactly one argument";
+            end if;
+
+            declare
+               Typ      : constant Base_Type_Decl :=
+                  AR.F_Prefix.P_Name_Designated_Type;
+               Ret_Typ  : constant Base_Type_Decl :=
+                  AR.P_Universal_Int_Type.As_Base_Type_Decl;
+               Val      : constant Eval_Result :=
+                  Expr_Eval (Args.Child (1).As_Param_Assoc.F_R_Expr);
+            begin
+               if Typ.P_Is_Int_Type then
+                  if Val.Kind /= Int then
+                     raise Property_Error with
+                        "'Pos expects an integer argument";
+                  end if;
+
+                  --  The evaluator doesn't check if Pos argument is in the
+                  --  range of Typ, i.e., illegal code such as:
+                  --    Positive'Pos (-2)
+                  --  will return -2.
+
+                  return Create_Int_Result (Ret_Typ, Val.Int_Result);
+               elsif Typ.P_Is_Enum_Type then
+                  case Val.Kind is
+                  when Int =>
+                     return Create_Int_Result (Ret_Typ, Val.Int_Result);
+                     --  This case allows to support Character enum literals
+                  when Enum_Lit =>
+                     return Create_Int_Result
+                       (Ret_Typ, Val.Enum_Result.P_Enum_Rep);
+                  when others =>
+                     raise Property_Error with
+                        "'Pos expects an argument of a discrete type";
+                  end case;
+               else
+                  raise Property_Error with
+                     "'Pos only applicable to discrete types";
+               end if;
+            end;
+         elsif Name in "length" then
+
+            --  Current support of 'Length only works on Strings (Character
+            --  arrays). TODO??? Add support for all array types, including
+            --  multidimensional ones.
+
+            if not Args.Is_Null then
+               raise Property_Error with
+                  "'Length require no argument";
+            end if;
+            --  Not true for multidimensional arrays. 'Length attribute can
+            --  take one argument standing for the Nth dimension of the
+            --  array length is requested.
+
+            declare
+               Typ    : constant Base_Type_Decl :=
+                  AR.F_Prefix.P_Name_Designated_Type;
+               Val    : constant Eval_Result :=
+                  Expr_Eval (AR.F_Prefix.As_Expr);
+               Result : Big_Integer;
+            begin
+               if Val.Kind /= String_Lit then
+                  raise Property_Error with
+                     "'Length expects a string argument";
+               end if;
+
+               Result.Set (GNATCOLL.GMP.Long (Length (As_String (Val))));
+
+               return Create_Int_Result (Typ, Result);
+            end;
+         else
+            raise Property_Error
+              with "Unhandled attribute ref: " & Image (Attr.Text);
+         end if;
+      end Eval_Function_Attr;
+
+      ----------------------
+      -- Eval_Array_Index --
+      ----------------------
+
+      function Eval_Array_Index
+        (Call_Expr : LAL.Call_Expr; Index : LAL.Expr) return Eval_Result
+      is
+         Array_Val : constant Eval_Result :=
+            Eval_Decl (Call_Expr.P_Referenced_Decl);
+         Index_Val : constant Eval_Result := Expr_Eval (Index);
+
+         use GNATCOLL.GMP.Integers.Misc;
+      begin
+         if Array_Val.Kind = String_Lit then
+            declare
+               Str   : constant Unbounded_Text_Type := As_String (Array_Val);
+               Index : constant Integer :=
+                  Integer (As_Signed_Long (Index_Val.Int_Result));
+            begin
+               return Create_Int_Result
+                 (Call_Expr.P_Expression_Type.P_Comp_Type,
+                  Wide_Wide_Character'Pos (Element (Str, Index)));
+            end;
+         else
+            raise Property_Error with
+               "Cannot eval array index of kind " & Array_Val.Kind'Image;
+         end if;
+      end Eval_Array_Index;
+
+      ----------------------
+      -- Eval_Array_Slice --
+      ----------------------
+
+      function Eval_Array_Slice
+        (Call_Expr : LAL.Call_Expr; Bounds : LAL.Bin_Op) return Eval_Result
+      is
+         Array_Val : constant Eval_Result :=
+            Eval_Decl (Call_Expr.P_Referenced_Decl);
+         First_Val : constant Eval_Result := Expr_Eval (Bounds.F_Left);
+         Last_Val  : constant Eval_Result := Expr_Eval (Bounds.F_Right);
+
+         use GNATCOLL.GMP.Integers.Misc;
+      begin
+         if Array_Val.Kind = String_Lit then
+            declare
+               Str   : Unbounded_Text_Type := As_String (Array_Val);
+               First : constant Integer :=
+                  Integer (As_Signed_Long (First_Val.Int_Result));
+               Last  : constant Integer :=
+                  Integer (As_Signed_Long (Last_Val.Int_Result));
+               Len   : constant Positive := Length (Str);
+
+            begin
+               if First < Last then
+                  --  Adjust Str regarding to requested bounds
+                  Delete (Str, Len - (Array_Val.Last - Last - 1), Len);
+                  Delete (Str, 1, First - Array_Val.First);
+               else
+                  --  The empty string
+                  Delete (Str, 1, Len);
+               end if;
+               return (String_Lit, Call_Expr.P_Expression_Type,
+                       Str, First, Last);
+            end;
+         else
+            raise Property_Error with
+               "Cannot eval array slide of kind " & Array_Val.Kind'Image;
+         end if;
+      end Eval_Array_Slice;
 
       ---------------
       -- Expr_Eval --
@@ -449,7 +900,7 @@ package body Libadalang.Expr_Eval is
    begin
       --  Processings on invalid Ada sources may lead to calling Expr_Eval on a
       --  null node. In this case, regular Ada runtime checks in code below
-      --  will trigger a Constaint_Error, while we want here to propagate
+      --  will trigger a Constraint_Error, while we want here to propagate
       --  Property_Error exceptions on invalid code. So do the check ourselves.
 
       if E.Is_Null then
@@ -465,30 +916,15 @@ package body Libadalang.Expr_Eval is
                Char      : constant LAL.Char_Literal := E.As_Char_Literal;
                Node_Type : constant LAL.Base_Type_Decl :=
                   Char.P_Expression_Type.P_Root_Type;
-
-               --  Fetch the standard character types
-
-               Std_Char_Type : constant LAL.Base_Type_Decl :=
-                  Char.P_Std_Entity (+"Character").As_Base_Type_Decl;
-
-               Std_Wide_Char_Type : constant LAL.Base_Type_Decl :=
-                  Char.P_Std_Entity (+"Wide_Character").As_Base_Type_Decl;
-
-               Std_Wide_Wide_Char_Type : constant LAL.Base_Type_Decl :=
-                  Char.P_Std_Entity
-                    (+"Wide_Wide_Character").As_Base_Type_Decl;
             begin
                --  A character literal is an enum value like any other and so
                --  its value should be its position in the enum. However, due
-               --  to how we define our artifical __standard unit, this
+               --  to how we define our artificial __standard unit, this
                --  assumption does not hold for the Character type and its
                --  variants (Wide_Character, etc.) as they are not defined in
                --  their exact shape. We must therefore implement a specific
                --  path to handle them here.
-               if Node_Type in Std_Char_Type
-                             | Std_Wide_Char_Type
-                             | Std_Wide_Wide_Char_Type
-               then
+               if Is_Std_Char_Type (Node_Type) then
                   --  Note that Langkit_Support's Character_Type is a
                   --  Wide_Wide_Character which can therefore also be used to
                   --  handle the Character and Wide_Character types.
@@ -509,14 +945,21 @@ package body Libadalang.Expr_Eval is
                     E.As_Int_Literal.P_Denoted_Value);
 
          when Ada_Real_Literal =>
-            return (Real,
-                    E.P_Universal_Real_Type.As_Base_Type_Decl,
-                    Long_Float'Value (Image (E.Text)));
+            return Result : Eval_Result :=
+              (Kind        => Real,
+               Expr_Type   => E.P_Universal_Real_Type.As_Base_Type_Decl,
+               Real_Result => <>)
+            do
+               Decode_Real_Literal (E.Text, Result.Real_Result);
+            end return;
 
          when Ada_String_Literal =>
-            return (String_Lit,
-                    E.P_Expression_Type,
-                    +E.As_String_Literal.P_Denoted_Value);
+            declare
+               Val : constant Unbounded_Text_Type :=
+                  +E.As_String_Literal.P_Denoted_Value;
+            begin
+               return (String_Lit, E.P_Expression_Type, Val, 1, Length (Val));
+            end;
 
          when Ada_Membership_Expr =>
             declare
@@ -631,9 +1074,51 @@ package body Libadalang.Expr_Eval is
                R  : constant Eval_Result := Expr_Eval (BO.F_Right);
             begin
                if L.Kind /= R.Kind then
-                  --  TODO??? There are actually some rules about implicit
-                  --  conversions that we might have to implement someday.
-                  raise Property_Error with "Unsupported type discrepancy";
+                  if L.Kind = Int and then R.Kind = Real
+                    and then Op.Kind = Ada_Op_Mult
+                  then
+                     declare
+                        Result : Rational;
+                        Left : Rational;
+                     begin
+                        Left.Set (L.Int_Result);
+                        Result.Set (Left * R.Real_Result);
+                        return Create_Real_Result (R.Expr_Type, Result);
+                     end;
+                  elsif L.Kind = Real and then R.Kind = Int
+                    and then Op.Kind = Ada_Op_Mult
+                  then
+                     declare
+                        Result : Rational;
+                        Right : Rational;
+                     begin
+                        Right.Set (R.Int_Result);
+                        Result.Set (L.Real_Result * Right);
+                        return Create_Real_Result (L.Expr_Type, Result);
+                     end;
+                  elsif L.Kind = Real and then R.Kind = Int
+                    and then Op.Kind = Ada_Op_Div
+                  then
+                     declare
+                        Result : Rational;
+                        Right : Rational;
+                     begin
+                        Right.Set (R.Int_Result);
+                        Result.Set (L.Real_Result / Right);
+                        return Create_Real_Result (L.Expr_Type, Result);
+                     end;
+                  elsif L.Kind = Real and then R.Kind = Int
+                    and then Op.Kind = Ada_Op_Pow
+                  then
+                     declare
+                        Result : Rational;
+                     begin
+                        Result.Set (L.Real_Result ** R.Int_Result);
+                        return Create_Real_Result (L.Expr_Type, Result);
+                     end;
+                  else
+                     raise Property_Error with "Unsupported type discrepancy";
+                  end if;
                end if;
 
                case R.Kind is
@@ -667,18 +1152,18 @@ package body Libadalang.Expr_Eval is
                when Real =>
                   --  Handle arithmetic operators on Real values
                   declare
-                     Result : Long_Float;
+                     Result : Rational;
                   begin
                      begin
                         case Op.Kind is
                         when Ada_Op_Plus =>
-                           Result := L.Real_Result + R.Real_Result;
+                           Result.Set (L.Real_Result + R.Real_Result);
                         when Ada_Op_Minus =>
-                           Result := L.Real_Result - R.Real_Result;
+                           Result.Set (L.Real_Result - R.Real_Result);
                         when Ada_Op_Mult =>
-                           Result := L.Real_Result * R.Real_Result;
+                           Result.Set (L.Real_Result * R.Real_Result);
                         when Ada_Op_Div =>
-                           Result := L.Real_Result / R.Real_Result;
+                           Result.Set (L.Real_Result / R.Real_Result);
                         when others =>
                            raise Property_Error with
                               "Unhandled operator: " & Op.Kind'Image;
@@ -713,18 +1198,33 @@ package body Libadalang.Expr_Eval is
                   end;
 
                when String_Lit =>
-                  --  Handle concatenation on string
-                  case Op.Kind is
-                  when Ada_Op_Concat =>
-                     return (String_Lit,
-                             E.P_Expression_Type,
-                             L.String_Result & R.String_Result);
-
-                  when others =>
-                     raise Property_Error with
-                        "Wrong operator for string: " & Op.Kind'Image;
-                  end case;
+                  raise Property_Error with
+                     "Wrong operator for string: " & Op.Kind'Image;
                end case;
+            end;
+
+         when Ada_Concat_Op =>
+            declare
+               CO            : constant LAL.Concat_Op := E.As_Concat_Op;
+               Concat_Result : Unbounded_Text_Type;
+               First         : Natural := 0;
+            begin
+               for I of CO.P_Operands loop
+                  declare
+                     ER : constant Eval_Result := Expr_Eval (I);
+                  begin
+                     if First = 0 then
+                        First := ER.First;
+                     end if;
+                     Concat_Result := Concat_Result & ER.String_Result;
+                  end;
+               end loop;
+               return
+                 (String_Lit,
+                  E.P_Expression_Type,
+                  Concat_Result,
+                  First,
+                  First + Length (Concat_Result));
             end;
 
          when Ada_Un_Op =>
@@ -780,17 +1280,17 @@ package body Libadalang.Expr_Eval is
 
                when Real =>
                   declare
-                     Operand : Long_Float renames Operand_Val.Real_Result;
-                     Result  : Long_Float;
+                     Operand : Rational renames Operand_Val.Real_Result;
+                     Result  : Rational;
                   begin
                      begin
                         case Op_Kind is
                         when Ada_Op_Minus =>
-                           Result := -Operand;
+                           Result.Set (-Operand);
                         when Ada_Op_Plus =>
-                           Result := Operand;
+                           Result.Set (Operand);
                         when Ada_Op_Abs =>
-                           Result := abs Operand;
+                           Result.Set (abs Operand);
                         when Ada_Op_Not =>
                            raise Property_Error with
                               "Invalid ""not"" operator for floating point"
@@ -820,145 +1320,14 @@ package body Libadalang.Expr_Eval is
                elsif Name = "last" then
                   return Eval_Range_Attr
                     (As_Ada_Node (AR.F_Prefix), Range_Last);
-               elsif Name in "min" | "max" then
-                  if AR.F_Args.Is_Null or else AR.F_Args.Children_Count /= 2
-                  then
-                     raise Property_Error with
-                        "'Min/'Max require exactly two arguments";
-                  end if;
-
-                  declare
-                     Typ   : constant Base_Type_Decl :=
-                       AR.F_Prefix.P_Name_Designated_Type;
-                     Val_1 : constant Eval_Result :=
-                       Expr_Eval (AR.F_Args.Child (1).As_Param_Assoc.F_R_Expr);
-                     Val_2 : constant Eval_Result :=
-                       Expr_Eval (AR.F_Args.Child (2).As_Param_Assoc.F_R_Expr);
-                  begin
-                     if Val_1.Kind /= Val_2.Kind then
-                        raise Property_Error with
-                           "Inconsistent inputs for 'Min/'Max";
-                     end if;
-
-                     case Val_1.Kind is
-                        when Int =>
-                           if Name = "min" then
-                              return Create_Int_Result
-                                (Typ,
-                                 Eval_Result'
-                                   (if Val_1.Int_Result < Val_2.Int_Result
-                                    then Val_1 else Val_2).Int_Result);
-                           else
-                              return Create_Int_Result
-                                (Typ,
-                                 Eval_Result'
-                                   (if Val_1.Int_Result > Val_2.Int_Result
-                                    then Val_1 else Val_2).Int_Result);
-                           end if;
-                        when Real =>
-                           return Create_Real_Result
-                             (Typ,
-                              (if Name = "min"
-                               then Long_Float'Min
-                                 (Val_1.Real_Result, Val_2.Real_Result)
-                               else Long_Float'Max
-                                 (Val_1.Real_Result, Val_2.Real_Result)));
-                        when others =>
-                           raise Property_Error with
-                              "'Min/'Max not applicable on enum types";
-                     end case;
-                  end;
-               elsif Name in "succ" | "pred" then
-                  if AR.F_Args.Is_Null or else AR.F_Args.Children_Count /= 1
-                  then
-                     raise Property_Error with
-                        "'Pred/'Succ require exactly one argument";
-                  end if;
-
-                  declare
-                     Typ      : constant Base_Type_Decl :=
-                       AR.F_Prefix.P_Name_Designated_Type;
-                     Val      : constant Eval_Result :=
-                       Expr_Eval (AR.F_Args.Child (1).As_Param_Assoc.F_R_Expr);
-                     Enum_Val : Enum_Literal_Decl;
-                  begin
-                     case Val.Kind is
-                     when Int =>
-                        --  TODO??? Properly handle modular types
-                        return Create_Int_Result
-                          (Typ,
-                           (if Name = "succ"
-                            then Val.Int_Result + 1
-                            else Val.Int_Result - 1));
-                     when Real =>
-                        raise Property_Error with
-                           "'Pred/'Succ not applicable to reals";
-                     when others =>
-                        Enum_Val := Ada_Node'
-                          (if Name = "succ"
-                           then Val.Enum_Result.Next_Sibling
-                           else Val.Enum_Result.Previous_Sibling)
-                          .As_Enum_Literal_Decl;
-
-                        if Enum_Val.Is_Null then
-                           raise Property_Error with
-                             "out of bounds 'Pred/'Succ on enum";
-                        end if;
-                        return Create_Enum_Result (Typ, Enum_Val);
-                     end case;
-                  end;
-               elsif Name in "val" then
-                  if AR.F_Args.Is_Null or else AR.F_Args.Children_Count /= 1
-                  then
-                     raise Property_Error with
-                        "'Val require exactly one argument";
-                  end if;
-
-                  declare
-                     Typ      : constant Base_Type_Decl :=
-                       AR.F_Prefix.P_Name_Designated_Type;
-                     Val      : constant Eval_Result :=
-                       Expr_Eval (AR.F_Args.Child (1).As_Param_Assoc.F_R_Expr);
-                  begin
-                     if Val.Kind /= Int then
-                        raise Property_Error with
-                           "'Val expects an integer argument";
-                     end if;
-
-                     if Typ.P_Is_Int_Type then
-                        return Create_Int_Result (Typ, Val.Int_Result);
-                     elsif Typ.P_Is_Enum_Type then
-                        declare
-                           Index : constant Integer :=
-                              To_Integer (Val.Int_Result) + 1;
-
-                           Enum_Val : Enum_Literal_Decl :=
-                              No_Enum_Literal_Decl;
-                        begin
-                           if Index > 0 then
-                              Enum_Val := Child
-                                (Typ.P_Root_Type.As_Type_Decl.F_Type_Def
-                                 .As_Enum_Type_Def.F_Enum_Literals,
-                                 Index).As_Enum_Literal_Decl;
-                           end if;
-
-                           if Enum_Val.Is_Null then
-                              raise Property_Error with
-                                "out of bounds 'Val on enum";
-                           end if;
-
-                           return Create_Enum_Result (Typ, Enum_Val);
-                        end;
-                     else
-                        raise Property_Error with
-                           "'Val only applicable to scalar types";
-                     end if;
-                  end;
                else
-                  raise Property_Error
-                    with "Unhandled attribute ref: " & Image (Attr.Text);
+                  return Eval_Function_Attr (AR, LAL.No_Assoc_List);
                end if;
             end;
+
+         when Ada_Qual_Expr =>
+            return Expr_Eval (E.As_Qual_Expr.F_Suffix);
+
          when Ada_Paren_Expr =>
             return Expr_Eval (E.As_Paren_Expr.F_Expr);
 
@@ -969,10 +1338,32 @@ package body Libadalang.Expr_Eval is
                Arg             : Expr;
                Designated_Type : constant Base_Type_Decl :=
                   C.F_Name.P_Name_Designated_Type;
+               C_Kind          : Call_Expr_Kind;
             begin
                --  Make sure that C's name designates a type and that C has
                --  exactly one argument.
-               if Designated_Type.Is_Null
+               if C.F_Name.Kind in Ada_Attribute_Ref then
+                  return Eval_Function_Attr
+                    (C.F_Name.As_Attribute_Ref, S.As_Assoc_List);
+               end if;
+
+               --  Avoid displaying LAL's internal property errors on calls to
+               --  P_Kind when evaluating invalid code.
+               begin
+                  C_Kind := C.P_Kind;
+               exception
+                  when Property_Error =>
+                     raise Property_Error with
+                        "Unhandled call expr: " & Image (E.Text);
+               end;
+
+               if C_Kind in Array_Index then
+                  return Eval_Array_Index
+                    (C, S.Child (1).As_Param_Assoc.F_R_Expr);
+               elsif C_Kind in Array_Slice then
+                  return Eval_Array_Slice
+                    (C, S.As_Bin_Op);
+               elsif Designated_Type.Is_Null
                   or else S.Is_Null
                   or else S.Children_Count /= 1
                then
@@ -984,13 +1375,13 @@ package body Libadalang.Expr_Eval is
                if Designated_Type.P_Is_Float_Type then
                   declare
                      Arg_Val : constant Eval_Result := Expr_Eval (Arg);
-                     Result  : Long_Float;
+                     Result  : Rational;
                   begin
                      case Arg_Val.Kind is
                      when Int =>
-                        Result := Long_Float (To_Integer (Arg_Val.Int_Result));
+                        Result.Set (Arg_Val.Int_Result);
                      when Real =>
-                        Result := Arg_Val.Real_Result;
+                        Result.Set (Arg_Val.Real_Result);
                      when Enum_Lit =>
                         raise Property_Error with "Invalid enum argument";
                      when String_Lit =>
@@ -1008,7 +1399,8 @@ package body Libadalang.Expr_Eval is
                      when Int =>
                         Result.Set (Arg_Val.Int_Result);
                      when Real =>
-                        Result.Set (GNATCOLL.GMP.Long (Arg_Val.Real_Result));
+                        Result.Set
+                          (GNATCOLL.GMP.Long (Arg_Val.Real_Result.To_Double));
                      when Enum_Lit =>
                         raise Property_Error with "Invalid enum argument";
                      when String_Lit =>
@@ -1119,7 +1511,7 @@ package body Libadalang.Expr_Eval is
         & Self.Kind'Image & " "
         & (case Self.Kind is
            when Int => Self.Int_Result.Image,
-           when Real => Self.Real_Result'Image,
+           when Real => Self.Real_Result.Image,
            when Enum_Lit => Self.Enum_Result.Image,
            when String_Lit => Encode (To_Text (Self.String_Result), "UTF-8"))
         & ">";

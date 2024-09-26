@@ -40,7 +40,10 @@ def print_err(*args, **kwargs):
 
 @memoize
 def json_schema():
-    with open(P.join(ENTRIES_PATH, 'entry_schema.yaml')) as f:
+    with open(
+        P.join(ENTRIES_PATH, 'entry_schema.yaml'),
+        encoding="utf-8",
+    ) as f:
         schema = f.read()
     return yaml.safe_load(schema)
 
@@ -134,13 +137,25 @@ def get_entries(*args):
         entries_names = args
     else:
         entries_names = [
+            # Old style TN entries live in the base dir
             f for f in glob(P.join(ENTRIES_PATH, '*.yaml'))
             if P.basename(f) != 'entry_schema.yaml'
-        ]
+        ] + (
+            # Gitlab entries live in subdirs
+            glob(P.join(ENTRIES_PATH, "adasat", "*.yaml"))
+            + glob(P.join(ENTRIES_PATH, "langkit", "*.yaml"))
+            + glob(P.join(ENTRIES_PATH, "libadalang", "*.yaml"))
+        )
 
     for fname in entries_names:
-        tn = P.basename(fname).split('.')[0]
-        with open(fname) as f:
+        # With this transformation:
+        # * Old style ticket numbers will look like S123-456
+        # * New style Gitlab ticket numbers will look like libadalang-123
+        tn = P.relpath(
+            fname, start=ENTRIES_PATH
+        ).split('.')[0].replace("/", "-")
+
+        with open(fname, encoding="utf-8") as f:
             entry = yaml.safe_load(f)
             entry['tn'] = tn
             validate_entry(tn, entry)

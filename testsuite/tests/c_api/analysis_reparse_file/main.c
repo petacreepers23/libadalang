@@ -37,9 +37,9 @@ void write_source(const char *src_buffer)
 
 void check(ada_analysis_unit unit)
 {
-    ada_base_entity ast_root;
-    ada_base_entity prelude_list, with_clause;
-    ada_base_entity has_limited;
+    ada_node ast_root;
+    ada_node prelude_list, with_clause;
+    ada_node has_limited;
 
     if (unit == NULL)
         error("Could not create the analysis unit for foo.adb from a file");
@@ -64,9 +64,11 @@ main(void)
     ada_analysis_context ctx;
     ada_analysis_unit unit;
 
-    ctx = ada_create_analysis_context(NULL, NULL, NULL, NULL, 1, 8);
-    if (ctx == NULL)
-        error("Could not create the analysis context");
+    ctx = ada_allocate_analysis_context ();
+    abort_on_exception ();
+
+    ada_initialize_analysis_context (ctx, NULL, NULL, NULL, NULL, 1, 8);
+    abort_on_exception ();
 
     /* First work with the "limited" keyword.  */
     write_source(src_buffer_1);

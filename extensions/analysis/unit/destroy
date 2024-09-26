@@ -1,0 +1,10 @@
+## vim: filetype=makoada
+
+for Cur in Unit.Nodes_Nameres.Iterate loop
+   declare
+      V : Resolution_Val renames Unit.Nodes_Nameres.Reference (Cur);
+   begin
+      Free_Memoized_Error (V.Exc_Id, V.Exc_Msg);
+      Dec_Ref (V.Return_Value);
+   end;
+end loop;

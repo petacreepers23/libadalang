@@ -1,0 +1,16 @@
+with "q";
+
+project P is
+
+   for Source_Dirs use Q.Source_Dirs;
+   for Main use ("main.adb");
+
+   package Compiler is
+      for Default_Switches ("Ada") use ("-gnatep=../src3/foo.prep");
+   end Compiler;
+
+   package Builder is
+      for Default_Switches ("Ada") use ("-x");
+   end Builder;
+
+end P;

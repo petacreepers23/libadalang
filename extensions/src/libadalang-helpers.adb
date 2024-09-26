@@ -1,44 +1,36 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Ada.Command_Line;
 with Ada.Containers.Synchronized_Queue_Interfaces;
 with Ada.Containers.Unbounded_Synchronized_Queues;
 with Ada.Containers.Hashed_Sets;
 with Ada.Directories;
-with Ada.Text_IO; use Ada.Text_IO;
+with Ada.Exceptions; use Ada.Exceptions;
+with Ada.Text_IO;    use Ada.Text_IO;
 with Ada.Unchecked_Deallocation;
 with System.Multiprocessors;
 
 with GNAT.OS_Lib;
 with GNAT.Traceback.Symbolic;
 
-with GNATCOLL.VFS;       use GNATCOLL.VFS;
+with GNATCOLL.File_Paths;
+with GNATCOLL.Strings; use GNATCOLL.Strings;
+with GNATCOLL.VFS;     use GNATCOLL.VFS;
+with GPR2.Options;
+with GPR2.Project.View;
+with GPR2.Project.View.Set;
+
+with Langkit_Support.File_Readers; use Langkit_Support.File_Readers;
+with Langkit_Support.Text;         use Langkit_Support.Text;
 
 with Libadalang.Auto_Provider;    use Libadalang.Auto_Provider;
+with Libadalang.Common;
+with Libadalang.GPR_Utils;        use Libadalang.GPR_Utils;
+with Libadalang.Preprocessing;    use Libadalang.Preprocessing;
 with Libadalang.Project_Provider; use Libadalang.Project_Provider;
-
-with Langkit_Support.Text; use Langkit_Support.Text;
 
 package body Libadalang.Helpers is
 
@@ -47,6 +39,8 @@ package body Libadalang.Helpers is
    --  the Abort_App procedure.
 
    function "+" (S : Unbounded_String) return String renames To_String;
+   function "+"
+     (S : String) return Unbounded_String renames To_Unbounded_String;
 
    procedure Print_Error (Message : String);
    --  Helper to print Message on the standard error
@@ -55,6 +49,14 @@ package body Libadalang.Helpers is
      (Unbounded_String);
    package String_Queues is new Ada.Containers.Unbounded_Synchronized_Queues
      (String_QI);
+
+   procedure Iterate_Scenario_Vars
+     (Scenario_Vars : Unbounded_String_Array;
+      Process       : access procedure (Name, Value : String));
+   --  Call ``Process`` on all the scenario variables defined in
+   --  ``Scenario_Vars``. ``Scenario_Vars`` should be an array of strings of
+   --  the format ``<Var>=<Val>``. If the format is incorrect, ``Abort_App``
+   --  will be called.
 
    -----------------
    -- Print_Error --
@@ -171,15 +173,19 @@ package body Libadalang.Helpers is
          --  Clean up local resources. This must be called both on normal
          --  termination and during abortion.
 
-         Project : Project_Tree_Access;
-         Env     : Project_Environment_Access;
-         --  Reference to the loaded project tree, if any. Null otherwise.
+         Project : GPR2.Project.Tree.Object;
+         --  Loaded project tree, if needed
+
+         FR : File_Reader_Reference;
+         --  File reader to use in all contexts for this app
 
          UFP : Unit_Provider_Reference;
          --  When project file handling is enabled, corresponding unit provider
 
          EH : Event_Handler_Reference;
-         --  Event handler for command line app.
+         --  Event handler for command line app
+
+         Default_Charset : Unbounded_String;
 
          type App_Job_Context_Array_Access is access App_Job_Context_Array;
          procedure Free is new Ada.Unchecked_Deallocation
@@ -207,14 +213,9 @@ package body Libadalang.Helpers is
 
          procedure Finalize is
          begin
+            FR := No_File_Reader_Reference;
             UFP := No_Unit_Provider_Reference;
             EH := No_Event_Handler_Ref;
-            if Project /= null then
-               Project.Unload;
-               Free (Project);
-               Free (Env);
-            end if;
-
             Free (Job_Contexts);
          end Finalize;
 
@@ -323,11 +324,67 @@ package body Libadalang.Helpers is
          if not Args.Parser.Parse then
             return;
          end if;
+         Default_Charset := Args.Charset.Get;
+
+         --  If preprocessor support is requested, create the corresponding
+         --  file reader.
+
+         if Length (Args.Preprocessor_Data_File.Get) > 0 then
+            declare
+               --  First create the path to find the preprocessor data file and
+               --  the definition files.
+
+               use GNATCOLL.File_Paths;
+               US_Dirs : constant Args.Preprocessor_Path.Result_Array :=
+                  Args.Preprocessor_Path.Get;
+               XS_Dirs : XString_Array (US_Dirs'Range);
+
+               Default_Config : File_Config;
+               File_Configs   : File_Config_Maps.Map;
+            begin
+               for I in US_Dirs'Range loop
+                  XS_Dirs (I) := To_XString (+US_Dirs (I));
+               end loop;
+
+               --  Then parse these files
+
+               Parse_Preprocessor_Data_File
+                 (+Args.Preprocessor_Data_File.Get,
+                  Create_Path (XS_Dirs),
+                  Default_Config,
+                  File_Configs);
+
+               --  Force the "blank lines" mode, as the default "delete lines"
+               --  mode changes line numbers, and is thus tooling unfriendly.
+
+               declare
+                  procedure Force_Line_Mode (Config : in out File_Config);
+
+                  ---------------------
+                  -- Force_Line_Mode --
+                  ---------------------
+
+                  procedure Force_Line_Mode (Config : in out File_Config) is
+                  begin
+                     Config.Line_Mode := Blank_Lines;
+                  end Force_Line_Mode;
+               begin
+                  Iterate
+                    (Default_Config, File_Configs, Force_Line_Mode'Access);
+               end;
+
+               --  We are finally ready to create the preprocessing file reader
+               --  from these configurations.
+
+               FR := Create_Preprocessor (Default_Config, File_Configs);
+            end;
+         end if;
 
          --  Use the default command line event handler. Forward the value of
-         --  the Exit_On_Missing_File command line option.
+         --  the Keep_Going_On_Missing_File command line option.
 
-         EH := Command_Line_Event_Handler (Args.Exit_On_Missing_File.Get);
+         EH := Command_Line_Event_Handler
+           (Args.Keep_Going_On_Missing_File.Get);
 
          Trace.Increase_Indent ("Setting up the unit provider");
          if Length (Args.Project_File.Get) > 0 then
@@ -335,34 +392,71 @@ package body Libadalang.Helpers is
                Abort_App ("--auto-dir conflicts with -P");
             end if;
 
-            --  Handle project file and build the list of source files to
-            --  process.
-            Load_Project
-              (Project_File  => +Args.Project_File.Get,
-               Scenario_Vars =>
-                 Unbounded_String_Array (Args.Scenario_Vars.Get),
-               Target        => +Args.Target.Get,
-               RTS           => +Args.RTS.Get,
-               Config_File   => +Args.Config_File.Get,
-               Project       => Project,
-               Env           => Env);
-            UFP := Project_To_Provider (Project);
+            --  Load the requested project file
 
-            if not Files_From_Args (Files) then
-               declare
-                  Mode : constant Source_Files_Mode :=
-                    (if Args.Process_Runtime.Get
-                     then Whole_Project_With_Runtime
-                     else (if Args.Process_Full_Project_Tree.Get
-                           then Default
-                           else Root_Project));
-               begin
-                  Files.Append_Vector (Source_Files (Project.all, Mode));
-               end;
-            end if;
+            declare
+               Project_Filename  : constant String := +Args.Project_File.Get;
+               Scenario_Vars     : constant Unbounded_String_Array :=
+                 Unbounded_String_Array (Args.Scenario_Vars.Get);
+               Target            : constant String := +Args.Target.Get;
+               RTS               : constant String := +Args.RTS.Get;
+               Config_File       : constant String := +Args.Config_File.Get;
+            begin
+               Load_Project
+                 (Project_Filename,
+                  Scenario_Vars,
+                  Target,
+                  RTS,
+                  Config_File,
+                  Project,
+                  (if GPR_Absent_Dir_Warning
+                   then GPR2.Warning
+                   else GPR2.No_Error));
+               UFP := Project_To_Provider (Project);
 
-            --  Fill in the provider
-            App_Ctx.Provider := (Kind => Project_File, Project => Project);
+               --  If none was given, build the list of source files to process
+
+               if not Files_From_Args (Files) then
+                  declare
+                     Mode : constant Source_Files_Mode :=
+                       (if Args.Process_Runtime.Get
+                        then Whole_Project_With_Runtime
+                        else (if Args.Process_Full_Project_Tree.Get
+                              then Default
+                              else Root_Project));
+
+                     --  Decode the "--subproject" arguments
+
+                     Project_Names : constant Unbounded_String_Array :=
+                       Unbounded_String_Array (Args.Subprojects.Get);
+                     Projects      : GPR2.Project.View.Set.Object;
+                  begin
+                     for N of Project_Names loop
+                        begin
+                           Projects.Include (Lookup (Project, +N));
+                        exception
+                           when Exc : GPR2.Project_Error =>
+                              Abort_App
+                                ("--subproject: " & Exception_Message (Exc));
+                        end;
+                     end loop;
+
+                     Files.Append_Vector
+                       (Source_Files (Project, Mode, Projects));
+                  end;
+               end if;
+
+               --  Create the unit provider
+
+               App_Ctx.Provider := (Kind => Project_File, Project => Project);
+
+               --  If no charset was specified, detect the default one from the
+               --  project file.
+
+               if Default_Charset = Null_Unbounded_String then
+                  Default_Charset := +Default_Charset_From_Project (Project);
+               end if;
+            end;
 
          elsif Args.Auto_Dirs.Get'Length > 0 then
             --  The auto provider is requested: initialize it with the given
@@ -426,6 +520,45 @@ package body Libadalang.Helpers is
          end if;
          Trace.Decrease_Indent;
 
+         --  If no charset was specified, use the default one
+
+         if Default_Charset = Null_Unbounded_String then
+            Default_Charset := +Libadalang.Common.Default_Charset;
+         end if;
+
+         --  If requested, sort the source files to process by basename
+
+         if Args.Sort_By_Basename.Get then
+            declare
+               function "<" (Left, Right : Unbounded_String) return Boolean;
+               --  Return whether the basename for ``Left`` should be sorted
+               --  before the basename for ``Right``. If they are the same,
+               --  sort using the full path.
+
+               ---------
+               -- "<" --
+               ---------
+
+               function "<" (Left, Right : Unbounded_String) return Boolean is
+                  L : constant String := To_String (Left);
+                  R : constant String := To_String (Right);
+
+                  SL : constant String := Ada.Directories.Simple_Name (L);
+                  SR : constant String := Ada.Directories.Simple_Name (R);
+               begin
+                  if SL = SR then
+                     return L < R;
+                  else
+                     return SL < SR;
+                  end if;
+               end "<";
+
+               package Sorting is new String_Vectors.Generic_Sorting;
+            begin
+               Sorting.Sort (Files);
+            end;
+         end if;
+
          --  Initialize contexts
 
          declare
@@ -445,7 +578,8 @@ package body Libadalang.Helpers is
               (ID              => JID,
                App_Ctx         => App_Ctx'Unchecked_Access,
                Analysis_Ctx    => Create_Context
-                                    (Charset       => +Args.Charset.Get,
+                                    (Charset       => +Default_Charset,
+                                     File_Reader   => FR,
                                      Unit_Provider => UFP,
                                      Event_Handler => EH),
                Units_Processed => <>,
@@ -499,36 +633,14 @@ package body Libadalang.Helpers is
       end Run;
    end App;
 
-   ------------------
-   -- Load_Project --
-   ------------------
+   ---------------------------
+   -- Iterate_Scenario_Vars --
+   ---------------------------
 
-   procedure Load_Project
-     (Project_File             : String;
-      Scenario_Vars            : Unbounded_String_Array := Empty_Array;
-      Target, RTS, Config_File : String := "";
-      Project                  : out Project_Tree_Access;
-      Env                      : out Project_Environment_Access)
-   is
-      procedure Cleanup;
-      --  Cleanup helpers for error handling
-
-      -------------
-      -- Cleanup --
-      -------------
-
-      procedure Cleanup is
-      begin
-         Free (Project);
-         Free (Env);
-      end Cleanup;
+   procedure Iterate_Scenario_Vars
+     (Scenario_Vars : Unbounded_String_Array;
+      Process       : access procedure (Name, Value : String)) is
    begin
-      Libadalang.Project_Provider.Trace.Trace
-        ("Loading project " & Project_File);
-      Project := new Project_Tree;
-      Initialize (Env);
-
-      --  Set scenario variables
       for Assoc of Scenario_Vars loop
          declare
             A        : constant String := +Assoc;
@@ -539,39 +651,94 @@ package body Libadalang.Helpers is
                Eq_Index := Eq_Index + 1;
             end loop;
             if Eq_Index not in A'Range then
-               Cleanup;
                Abort_App ("Invalid scenario variable: -X" & A);
             end if;
-            Change_Environment
-              (Env.all,
-               A (A'First .. Eq_Index - 1),
-               A (Eq_Index + 1 .. A'Last));
+            Process.all
+              (Name  => A (A'First .. Eq_Index - 1),
+               Value => A (Eq_Index + 1 .. A'Last));
          end;
       end loop;
+   end Iterate_Scenario_Vars;
 
-      --  Set the target/runtime or use the config file
-      if Config_File = "" then
-         Env.Set_Target_And_Runtime (Target, RTS);
-      elsif Target /= "" or else RTS /= "" then
-         Cleanup;
-         Abort_App ("--config not allowed if --target or --RTS are passed");
-      else
-         Env.Set_Config_File (Create (+Config_File));
+   ------------------
+   -- Load_Project --
+   ------------------
+
+   procedure Load_Project
+     (Project_File             : String;
+      Scenario_Vars            : Unbounded_String_Array := Empty_Array;
+      Target, RTS, Config_File : String := "";
+      Project                  : out GPR2.Project.Tree.Object;
+      Absent_Dir_Error         : GPR2.Error_Level := GPR2.Warning)
+   is
+      Options : GPR2.Options.Object;
+      Error   : Boolean := False;
+
+      procedure Set_Scenario_Var (Name, Value : String);
+      --  Set the given scenario variable in ``Ctx``
+
+      ----------------------
+      -- Set_Scenario_Var --
+      ----------------------
+
+      procedure Set_Scenario_Var (Name, Value : String) is
+      begin
+         Options.Add_Switch (GPR2.Options.X, Name & "=" & Value);
+      end Set_Scenario_Var;
+
+   begin
+      Libadalang.Project_Provider.Trace.Trace
+        ("Loading project " & Project_File & " with GPR2");
+
+      Iterate_Scenario_Vars (Scenario_Vars, Set_Scenario_Var'Access);
+
+      --  Load the project tree with either a config file (if given) or the
+      --  requested target/runtime, and beware of loading errors
+
+      begin
+         Options.Add_Switch (GPR2.Options.P, Project_File);
+
+         if Config_File /= "" then
+            if Target /= "" or else RTS /= "" then
+               Abort_App
+                 ("--config not allowed if --target or --RTS are passed");
+            end if;
+            Options.Add_Switch (GPR2.Options.Config, Config_File);
+         end if;
+
+         if Target /= "" then
+            Options.Add_Switch (GPR2.Options.Target, Target);
+         end if;
+
+         if RTS /= "" then
+            Options.Add_Switch (GPR2.Options.RTS, RTS);
+         end if;
+
+         Error := not Project.Load
+           (Options,
+            With_Runtime     => True,
+            Absent_Dir_Error => Absent_Dir_Error);
+      exception
+         when Exc : GPR2.Project_Error =>
+            Error := True;
+            Libadalang.Project_Provider.Trace.Trace
+              ("Loading failed: " & Exception_Message (Exc));
+      end;
+
+      Error := Error or else not Update_Sources (Project);
+
+      --  Whether the project loaded successfully or not, print messages since
+      --  they may contain warnings. If there was an error, abort the App.
+
+      Error := Error or else Project.Log_Messages.Has_Error;
+      Project.Log_Messages.Output_Messages
+        (Information => False,
+         Warning     => True,
+         Error       => True);
+      if Error then
+         Abort_App;
       end if;
 
-      --  Load the project tree, and beware of loading errors. Wrap
-      --  the project in a unit provider.
-      begin
-         Project.Load
-           (Root_Project_Path => Create (+Project_File),
-            Env               => Env,
-            Errors            => Print_Error'Access);
-      exception
-         when Invalid_Project =>
-            Libadalang.Project_Provider.Trace.Trace ("Loading failed");
-            Cleanup;
-            Abort_App;
-      end;
       Libadalang.Project_Provider.Trace.Trace ("Loading succeeded");
    end Load_Project;
 
@@ -580,9 +747,9 @@ package body Libadalang.Helpers is
    -------------------------
 
    function Project_To_Provider
-     (Project : Project_Tree_Access) return Unit_Provider_Reference
+     (Project : GPR2.Project.Tree.Object) return Unit_Provider_Reference
    is
-      Partition : Provider_And_Projects_Array_Access :=
+      Partition : GPR2_Provider_And_Projects_Array_Access :=
         Create_Project_Unit_Providers (Project);
    begin
       --  Reject partitions with multiple parts: we cannot analyze it with
@@ -600,14 +767,26 @@ package body Libadalang.Helpers is
       end return;
    end Project_To_Provider;
 
+   ----------------------------
+   -- Cmd_Line_Event_Handler --
+   ----------------------------
+
    package Cmd_Line_Event_Handler is
+
+      --  This package implements an event handler that warns about missing
+      --  file. Each file that is missing is reported only once.
+
       package Files_Sets is new Ada.Containers.Hashed_Sets
         (Unbounded_Text_Type, Hash, "=");
 
-      type Cmd_Line_Event_Handler_Type
-      is new Event_Handler_Interface with record
-         Exit_On_Missing_File : Boolean;
+      type Cmd_Line_Event_Handler_Type is new Event_Handler_Interface
+      with record
+         Keep_Going_On_Missing_File : Boolean;
+         --  False if a missing file should make the App exit, True otherwise
+
          Already_Seen_Missing_Files : Files_Sets.Set;
+         --  Set of source files for which we already warned that they are
+         --  missing.
       end record;
 
       overriding procedure Unit_Requested_Callback
@@ -627,6 +806,7 @@ package body Libadalang.Helpers is
 
       overriding procedure Release (Self : in out Cmd_Line_Event_Handler_Type)
       is null;
+
    end Cmd_Line_Event_Handler;
 
    package body Cmd_Line_Event_Handler is
@@ -643,25 +823,35 @@ package body Libadalang.Helpers is
          Found              : Boolean;
          Is_Not_Found_Error : Boolean) is
       begin
-         if not Found and Is_Not_Found_Error then
-            if Self.Already_Seen_Missing_Files.Contains
-              (To_Unbounded_Text (Name))
-            then
+         --  Warn only about missing files that are needed according to Ada
+         --  legality rules.
+
+         if Found or else not Is_Not_Found_Error then
+            return;
+         end if;
+
+         declare
+            Filename : constant Unbounded_Text_Type :=
+              To_Unbounded_Text (Name);
+         begin
+            if Self.Already_Seen_Missing_Files.Contains (Filename) then
                return;
             end if;
 
-            Self.Already_Seen_Missing_Files.Include (To_Unbounded_Text (Name));
+            Self.Already_Seen_Missing_Files.Include (Filename);
 
             Print_Error
-              ((if Self.Exit_On_Missing_File then "ERROR: " else "WARNING: ")
+              ((if Self.Keep_Going_On_Missing_File
+                then "WARNING: "
+                else "ERROR: ")
                & "File "
                & Ada.Directories.Simple_Name (Image (Name))
                & " not found");
 
-            if Self.Exit_On_Missing_File then
+            if not Self.Keep_Going_On_Missing_File then
                GNAT.OS_Lib.OS_Exit (1);
             end if;
-         end if;
+         end;
       end Unit_Requested_Callback;
    end Cmd_Line_Event_Handler;
 
@@ -670,15 +860,12 @@ package body Libadalang.Helpers is
    --------------------------------
 
    function Command_Line_Event_Handler
-     (Exit_On_Missing_File : Boolean) return Event_Handler_Reference
-   is
-      Ret : Event_Handler_Reference;
+     (Keep_Going_On_Missing_File : Boolean) return Event_Handler_Reference is
    begin
-      Ret.Set
+      return Create_Event_Handler_Reference
         (Cmd_Line_Event_Handler.Cmd_Line_Event_Handler_Type'
-          (Exit_On_Missing_File       => Exit_On_Missing_File,
+          (Keep_Going_On_Missing_File => Keep_Going_On_Missing_File,
            Already_Seen_Missing_Files => <>));
-      return Ret;
    end Command_Line_Event_Handler;
 
 end Libadalang.Helpers;

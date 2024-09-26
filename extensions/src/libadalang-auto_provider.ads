@@ -1,25 +1,6 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 --  This package provides the capability to automatically discover the layout
 --  of source files in an Ada project, given a list of files, or a file name
@@ -28,13 +9,15 @@
 --  It is useful in order to easily run Libadalang on a complex project that
 --  does not have its own GPR project file.
 
-with Langkit_Support.Symbols;
-
+with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 private with Ada.Containers.Hashed_Maps;
 
+with GNAT.Regexp;
 with GNAT.Regpat;
 
 with GNATCOLL.VFS;
+
+with Langkit_Support.Symbols;
 
 with Libadalang.Analysis; use Libadalang.Analysis;
 with Libadalang.Common;   use Libadalang.Common;
@@ -44,8 +27,10 @@ package Libadalang.Auto_Provider is
    use Support.Text;
 
    Default_Source_Filename_Pattern : constant GNAT.Regpat.Pattern_Matcher :=
-      GNAT.Regpat.Compile (".*\.(ad.|a|spc|bdy)");
-   --  Default matcher for Ada source filenames. This matches most usual file
+     GNAT.Regpat.Compile ("\.(ad.|a|spc|bdy)$");
+   Default_Source_Filename_Regexp : constant GNAT.Regexp.Regexp :=
+     GNAT.Regexp.Compile (".*\.(ad.|a|spc|bdy)");
+   --  Default matchers for Ada source filenames. They match most usual file
    --  extensions used for Ada sources: ``.ads``, ``.adb``, ``.ada``, ``.spc``,
    --  ``.bdy``, etc.
 
@@ -59,6 +44,15 @@ package Libadalang.Auto_Provider is
    --  ``Name_Pattern``. The result is dynamically allocated, so the caller
    --  must free it when done with it.
 
+   function Find_Files_Regexp
+     (Name_Pattern : GNAT.Regexp.Regexp := Default_Source_Filename_Regexp;
+      Directories  : GNATCOLL.VFS.File_Array)
+      return GNATCOLL.VFS.File_Array_Access;
+   --  Like ``Find_Files``, but works on GNAT.Regexp patterns.
+   --
+   --  Note: this function is not an overload, so that calls such as
+   --  ``Find_Files (Directories => D);`` are not ambiguous.
+
    type Auto_Unit_Provider is
       new Libadalang.Analysis.Unit_Provider_Interface with private;
    --  Unit provider for a given list of files
@@ -69,6 +63,14 @@ package Libadalang.Auto_Provider is
       Kind     : Analysis_Unit_Kind) return String;
    --% no-document: True
 
+   overriding procedure Get_Unit_Location
+     (Provider       : Auto_Unit_Provider;
+      Name           : Text_Type;
+      Kind           : Analysis_Unit_Kind;
+      Filename       : in out Unbounded_String;
+      PLE_Root_Index : in out Natural);
+   --% no-document: True
+
    overriding function Get_Unit
      (Provider    : Auto_Unit_Provider;
       Context     : Analysis_Context'Class;
@@ -76,6 +78,17 @@ package Libadalang.Auto_Provider is
       Kind        : Analysis_Unit_Kind;
       Charset     : String := "";
       Reparse     : Boolean := False) return Analysis_Unit'Class;
+   --% no-document: True
+
+   overriding procedure Get_Unit_And_PLE_Root
+     (Provider       : Auto_Unit_Provider;
+      Context        : Analysis_Context'Class;
+      Name           : Text_Type;
+      Kind           : Analysis_Unit_Kind;
+      Charset        : String := "";
+      Reparse        : Boolean := False;
+      Unit           : in out Analysis_Unit'Class;
+      PLE_Root_Index : in out Natural);
    --% no-document: True
 
    overriding procedure Release (Provider : in out Auto_Unit_Provider);
@@ -107,20 +120,24 @@ package Libadalang.Auto_Provider is
 
 private
 
+   use GNATCOLL.VFS;
    use Langkit_Support.Symbols;
 
-   use GNATCOLL.VFS;
+   type Filename_And_PLE_Root is record
+      Filename       : Unbounded_String;
+      PLE_Root_Index : Positive;
+   end record;
 
-   package CU_To_File_Maps is new Ada.Containers.Hashed_Maps
+   package Unit_Maps is new Ada.Containers.Hashed_Maps
      (Key_Type        => Symbol_Type,
-      Element_Type    => Virtual_File,
+      Element_Type    => Filename_And_PLE_Root,
       Hash            => Hash,
       Equivalent_Keys => "=");
 
    type Auto_Unit_Provider is new Libadalang.Analysis.Unit_Provider_Interface
    with record
       Keys    : Symbol_Table;
-      Mapping : CU_To_File_Maps.Map;
+      Mapping : Unit_Maps.Map;
    end record;
 
    type Auto_Unit_Provider_Access is access all Auto_Unit_Provider;

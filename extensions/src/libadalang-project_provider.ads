@@ -1,31 +1,18 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 with Ada.Containers.Vectors;
 with Ada.Strings.Unbounded;
+with Ada.Unchecked_Deallocation;
 
 with GNATCOLL.Projects;
 with GNATCOLL.Traces; use GNATCOLL.Traces;
+with GPR2.Project.Tree;
+with GPR2.Project.View;
+with GPR2.Project.View.Vector;
+with GPR2.Project.View.Set;
 
 with Libadalang.Analysis;
 with Libadalang.Common; use Libadalang.Common;
@@ -40,8 +27,22 @@ package Libadalang.Project_Provider is
    package LAL renames Libadalang.Analysis;
    package Prj renames GNATCOLL.Projects;
 
-   Trace : constant GNATCOLL.Traces.Trace_Handle := GNATCOLL.Traces.Create
-     ("LIBADALANG.PROJECT_PROVIDER", GNATCOLL.Traces.From_Config);
+   Trace : constant GNATCOLL.Traces.Trace_Handle :=
+     GNATCOLL.Traces.Create
+       ("LIBADALANG.PROJECT_PROVIDER", GNATCOLL.Traces.From_Config);
+   Partition_Trace : constant GNATCOLL.Traces.Trace_Handle :=
+     GNATCOLL.Traces.Create
+       ("LIBADALANG.PROJECT_PROVIDER.PARTITION", GNATCOLL.Traces.From_Config);
+   Resolution_Trace : constant GNATCOLL.Traces.Trace_Handle :=
+     GNATCOLL.Traces.Create
+       ("LIBADALANG.PROJECT_PROVIDER.RESOLUTION", GNATCOLL.Traces.From_Config);
+
+   Unsupported_View_Error : exception;
+   --  See the ``Create_Project_Unit_Provider`` functions below
+
+   ---------------------------------
+   -- GNATCOLL.Projects based API --
+   ---------------------------------
 
    type Provider_And_Projects is record
       Provider : LAL.Unit_Provider_Reference;
@@ -68,9 +69,6 @@ package Libadalang.Project_Provider is
    --
    --  The project pointed to by ``Tree`` must outlive the returned unit file
    --  providers, and it is up to callers to deallocate ``Tree`` itself.
-
-   Unsupported_View_Error : exception;
-   --  See the ``Create_Project_Unit_Provider`` function
 
    function Create_Project_Unit_Provider
      (Tree             : Prj.Project_Tree_Access;
@@ -110,8 +108,9 @@ package Libadalang.Project_Provider is
      (Default, Root_Project, Whole_Project, Whole_Project_With_Runtime);
 
    function Source_Files
-     (Tree : Prj.Project_Tree'Class;
-      Mode : Source_Files_Mode := Default)
+     (Tree     : Prj.Project_Tree'Class;
+      Mode     : Source_Files_Mode := Default;
+      Projects : Prj.Project_Array := Prj.Empty_Project_Array)
       return Filename_Vectors.Vector;
    --  Return the list of source files in the given project ``Tree``. Which
    --  sources are considered depends on ``Mode``:
@@ -126,5 +125,131 @@ package Libadalang.Project_Provider is
    --
    --  * ``Whole_Project_With_Runtime``: sources in the whole project tree plus
    --    runtime sources.
+   --
+   --  If ``Projects`` is not empty, return instead the list for the sources in
+   --  all sub-projects in ``Projects``, still applying the given mode to the
+   --  search.
+
+   function Default_Charset_From_Project
+     (Tree    : Prj.Project_Tree'Class;
+      Project : Prj.Project_Type := Prj.No_Project) return String;
+   --  Try to detect the default charset to use for the given project.
+   --
+   --  Restrict the detection to the subproject ``Project``, or to ``Tree``'s
+   --  root project if left to ``Prj.No_Project``.
+   --
+   --  Note that, as of today, this detection only looks for the ``-gnatW8``
+   --  compiler switch: other charsets are not supported.
+
+   --------------------
+   -- GPR2 based API --
+   --------------------
+
+   --  .. ATTENTION:: This is an experimental feature, so even if it is exposed
+   --  to allow experiments, it is totally unsupported and the API is very
+   --  likely to change in the future.
+
+   Runtime_Missing_Error : exception;
+   --  Exception raised by the ``Create_Project_Unit_Provider[s]`` functions
+   --  when passed a project that does not have the runtime project loaded.
+   --
+   --  In order to load the runtime project, pass ``With_Runtime => True`` to
+   --  the relevant project loading procedure (in ``GPR2.Project.Tree``).
+
+   Source_Info_Missing_Error : exception;
+   --  Exception raised by the ``Create_Project_Unit_Provider[s]`` functions
+   --  when passed a project that does not contain the necessary source
+   --  information.
+   --
+   --  In order to load the source infomation necessary for unit providers to
+   --  work correctly, use ``GPR2.Projects.Tree.Update_Sources`` or the
+   --  ``Update_Sources`` shortcut below.
+
+   procedure Check_Source_Info (Tree : GPR2.Project.Tree.Object);
+   --  Raise ``Runtime_Missing_Error` if ``Tree`` does not have a runtime
+   --  project loaded. Raise ``Source_Missing_Info_Error`` if it does not have
+   --  source information loaded.
+
+   function Update_Sources (Tree : GPR2.Project.Tree.Object) return Boolean;
+   --  Call ``GPR2.Project.Tree.Update_Sources``, print potential
+   --  warnings/errors. Return ``True`` if there was no error, ``False``
+   --  otherwise.
+
+   type GPR2_Provider_And_Projects is record
+      Provider : LAL.Unit_Provider_Reference;
+      Projects : GPR2.Project.View.Vector.Object;
+   end record;
+   --  Associates one project unit provider with all the projects on which it
+   --  has visibility.
+
+   type GPR2_Provider_And_Projects_Array is
+      array (Positive range <>) of GPR2_Provider_And_Projects;
+   type GPR2_Provider_And_Projects_Array_Access is
+      access all GPR2_Provider_And_Projects_Array;
+   procedure Free is new Ada.Unchecked_Deallocation
+     (GPR2_Provider_And_Projects_Array,
+      GPR2_Provider_And_Projects_Array_Access);
+
+   function Create_Project_Unit_Providers
+     (Tree : GPR2.Project.Tree.Object)
+      return GPR2_Provider_And_Projects_Array_Access;
+   --  Create unit providers for consistent sets of projects in ``Tree``.
+   --
+   --  As unit providers must guarantee that there exists at most one source
+   --  file for each couple (unit name, unit kind), this creates more than one
+   --  unit providers when Project is an aggregate project that contains
+   --  multiple definitions for the same unit.
+   --
+   --  The project pointed to by ``Tree`` must outlive the returned unit file
+   --  providers, and it is up to callers to deallocate ``Tree`` itself.
+
+   function Create_Project_Unit_Provider
+     (Tree    : GPR2.Project.Tree.Object;
+      Project : GPR2.Project.View.Object := GPR2.Project.View.Undefined)
+      return LAL.Unit_Provider_Reference;
+   --  Likewise, but create only one unit provider.
+   --
+   --  If a non-null ``Project`` is given, use it to provide units. Raise an
+   --  ``Unsupported_View_Error`` exception if that project aggregates more
+   --  than one project in its closure.
+   --
+   --  If Project is not provided, run ``Create_Project_Unit_Providers``: if it
+   --  returns only one provider, return it, otherwise raise an
+   --  ``Unsupported_View_Error`` exception.
+
+   function Source_Files
+     (Tree     : GPR2.Project.Tree.Object;
+      Mode     : Source_Files_Mode := Default;
+      Projects : GPR2.Project.View.Set.Object := GPR2.Project.View.Set.Empty)
+      return Filename_Vectors.Vector;
+   --  Return the list of source files in the given project ``Tree``. Which
+   --  sources are considered depends on ``Mode``:
+   --
+   --  * ``Default``: sources in the root project and its non-externally built
+   --    dependencies;
+   --
+   --  * ``Root_Project``: sources in the root project only;
+   --
+   --  * ``Whole_Project``: sources in the whole project tree (i.e. including
+   --    externally built dependencies);
+   --
+   --  * ``Whole_Project_With_Runtime``: sources in the whole project tree plus
+   --    runtime sources.
+   --
+   --  If ``Projects`` is not empty, return instead the list for the sources in
+   --  all sub-projects in ``Projects``, still applying the given mode to the
+   --  search.
+
+   function Default_Charset_From_Project
+     (Tree    : GPR2.Project.Tree.Object;
+      Project : GPR2.Project.View.Object := GPR2.Project.View.Undefined)
+      return String;
+   --  Try to detect the default charset to use for the given project.
+   --
+   --  Restrict the detection to the subproject ``Project``, or to ``Tree``'s
+   --  root project if left to ``Prj.No_Project``.
+   --
+   --  Note that, as of today, this detection only looks for the ``-gnatW8``
+   --  compiler switch: other charsets are not supported.
 
 end Libadalang.Project_Provider;

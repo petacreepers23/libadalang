@@ -7,7 +7,12 @@ Analyzing test.adb
 Resolving xrefs for node <CallStmt test.adb:3:4-3:12>
 *****************************************************
 
-Resolution failed for node <CallStmt test.adb:3:4-3:12>
+Name resolution failed as expected with:
+
+test.adb:3:4: error: no such entity
+3 |    Foo.Bar;
+  |    ^^^
+
 
 
 Done.

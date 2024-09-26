@@ -9,6 +9,8 @@ Contents:
 
    testsuite
    dev_doc
+   design_documents/index.rst
+   copyright_update
 
 Indices and tables
 ==================

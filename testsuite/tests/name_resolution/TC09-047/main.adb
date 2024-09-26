@@ -1,6 +1,6 @@
-with Libadalang.Analysis;  use Libadalang.Analysis;
-with Libadalang.Common;    use Libadalang.Common;
-with Ada.Text_IO;          use Ada.Text_IO;
+with Ada.Text_IO;         use Ada.Text_IO;
+with Libadalang.Analysis; use Libadalang.Analysis;
+with Libadalang.Common;   use Libadalang.Common;
 
 procedure Main is
 
@@ -31,7 +31,7 @@ procedure Main is
          return Over;
       end if;
 
-      if Kind (Node) /= Ada_Type_Decl then
+      if Kind (Node) not in Ada_Type_Decl then
          return Into;
       end if;
 

@@ -1,10 +1,12 @@
 Building Libadalang
 ###################
 
-First, note that if you have access to a pre-built Libadalang package, which
-generally come with GNAT Pro and GNAT Community, then you do not need to go
-through the following steps: just follow the instructions in the ``README``
-file that comes with this pre-built package.
+First, note that if you have access to a pre-built Libadalang package, bundled
+with GNAT Pro if you have a GNAT Pro subscription (for community users, we have
+a Libadalang crate on `Alire <https://alire.ada.dev/crates/libadalang>`_), then
+you do not need to go through the following steps: just follow the instructions
+in the ``README`` file that comes with this pre-built package.
+
 
 Setup
 -----
@@ -12,16 +14,21 @@ Setup
 To generate and build the library itself, you'll need to go through the
 following steps:
 
-* Make sure you have a working Python3 installation (version 3.7 or newer).
+* Make sure you have a working Python 3.9 or 3.10 installation.
 
-* Install the GNAT tools and compiler. You can find Community Editions on
-  `AdaCore's website <https://www.adacore.com/download>`_.
+* Install the GNAT tools and compiler. If do not have access to GNAT Pro, you
+  can find public editions of the Ada toolchain on your distribution repository
+  (as for example `here <https://packages.debian.org/sid/gnat>`_ for Debian) or
+  by installing it from `Alire <https://alire.ada.dev/docs/>`_.
 
 * Build and install the GNATcoll library (core, plus Iconv and GMP bindings).
   You can find its source release on `AdaCore's website
   <https://www.adacore.com/download>`_ or directly on GitHub's repositories for
   `gnatcoll-core <https://github.com/AdaCore/gnatcoll-core>`_ and
   `gnatcoll-bindings <https://github.com/AdaCore/gnatcoll-bindings>`_.
+
+* Build and install the AdaSAT library. You can find its sources on its `GitHub
+  repository <https://github.com/AdaCore/adasat>`_.
 
 * Install every Python dependency. We recommend creating a `virtual environment
   <https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/>`_
@@ -51,6 +58,11 @@ following steps:
      # install the langkit_support.gpr project.
      $ python manage.py install-langkit-support --library-types=static,static-pic,relocatable $PREFIX
 
+For GNATcoll, AdaSAT and Langkit, make sure to install the version that
+corresponds to the version of Libadalang that is built. For instance, build all
+``22.1`` branches, or all ``master`` branches. Mixing versions is not
+supported.
+
 To develop comfortably:
 
 * If you want interactive debugging when code is generated, install `IPython
@@ -64,7 +76,7 @@ Regarding the version of these dependencies: Libadalang's development branch
 (``master`` branch on the Git repository) is built and tested using the
 development version of Langkit, of GNATcoll, and of GNATcoll's own
 dependencies, and their release cycles are synchronized. This means that in
-order to build Libdalang's branch ``X``, you need to install Langkit using the
+order to build Libadalang's branch ``X``, you need to install Langkit using the
 branch of the same name, and likewise for GNATcoll and its dependencies.
 
 
@@ -86,7 +98,7 @@ directory. In order to build this source code into a shared library, run:
     $ python manage.py build --library-types=static,static-pic,relocatable
 
 Assuming you satisfied all the above dependencies, both commands should
-successfuly run to completion.
+successfully run to completion.
 
 While developing Libadalang you might be happy to use the following command:
 
@@ -156,18 +168,20 @@ Libadalang installed (and in particular its Python bindings) or to update your
 environment without installing it: see the corresponding section above.
 
 In addition, you need to install the ``laldoc`` Python project, which contains
-documentation extraction helpers:
+documentation extraction helpers, as well as ``sphinxcontrib-adadomain`` to
+properly generate Sphinx that documents Ada API:
 
 .. code-block:: sh
 
    $ pip install contrib/laldoc
+   $ pip install git+https://github.com/AdaCore/sphinxcontrib-adadomain
 
 From there, building this documentation as a set of static HTML pages is as
 easy as running the following command from the ``user_manual`` directory:
 
 .. code-block:: sh
 
-   $ make html
+   $ make newhtml
 
 Assuming successful completion, the documentation is then available in
 the ``user_manual/_build/html`` directory: you can start reading it from the
@@ -178,4 +192,4 @@ Note that on Mac OS X, security features require you to explicitly pass the
 
 .. code-block:: sh
 
-   $ make html LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+   $ make newhtml LD_LIBRARY_PATH="$LD_LIBRARY_PATH"

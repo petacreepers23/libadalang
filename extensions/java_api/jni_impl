@@ -1,0 +1,454 @@
+## vim: ft=makocpp
+
+<%
+api = java_api
+nat = c_api.get_name
+
+project_type = capi.get_name('gpr_project')
+str_array_type = capi.get_name('string_array_ptr')
+scn_var_type = capi.get_name('gpr_project_scenario_variable')
+
+sig_base = "com/adacore/" + ctx.lib_name.lower + "/" + ctx.lib_name.camel
+ptr_sig = sig_base + "$PointerWrapper"
+%>
+
+void add_error_to_diagnostics(
+    JNIEnv *env,
+    jstring error,
+    jobject diagnostics
+) {
+    // Get the "add" method of the list
+    jclass clazz = (*env)->GetObjectClass(env, diagnostics);
+    jmethodID add_id = (*env)-> GetMethodID(
+        env,
+        clazz,
+        "add",
+        "(Ljava/lang/Object;)Z"
+    );
+
+    // Call the "add" method with the Java string to add it to the diagnostics
+    (*env)->CallVoidMethod(env, diagnostics, add_id, error);
+}
+
+// Unwrap a scenario variable in the given pointer
+void ScenarioVariable_unwrap(
+    JNIEnv *env,
+    jobject scenario_variable,
+    ${scn_var_type} *scenario_variables_native_ref
+) {
+    // Get the Java class
+    jclass clazz = (*env)->GetObjectClass(env, scenario_variable);
+
+    % for field in ('name', 'value'):
+    // Get the field ids
+    jfieldID ${field}_field = (*env)->GetFieldID(
+        env,
+        clazz,
+        "${field}",
+        "Ljava/lang/String;"
+    );
+
+    // Get the field values
+    jstring ${field} = (jstring) (*env)->GetObjectField(
+        env,
+        scenario_variable,
+        ${field}_field
+    );
+
+    // Get the native values
+    const char *${field}_native = (*env)->GetStringUTFChars(
+        env,
+        ${field},
+        NULL
+    );
+    int ${field}_native_length = (*env)->GetStringUTFLength(
+        env,
+        ${field}
+    );
+
+    // Allocate the buffer in the result structure
+    scenario_variables_native_ref->${field} = calloc(${field}_native_length, sizeof(char));
+    for(int i = 0; i < ${field}_native_length; i++) {
+        scenario_variables_native_ref->${field}[i] = ${field}_native[i];
+    }
+
+    // Release the source chararcter pointer
+    (*env)->ReleaseStringUTFChars(env, ${field}, ${field}_native);
+    % endfor
+}
+
+// Release the given native scenario variable
+void ScenarioVariable_release(
+    ${scn_var_type} scenario_variable_native
+) {
+    free(scenario_variable_native.name);
+    free(scenario_variable_native.value);
+}
+
+// Load a gpr project
+${api.jni_func_sig("gpr_project_load", "jobject")}(
+    JNIEnv *env,
+    jclass jni_lib,
+    jstring project_file,
+    jobjectArray scenario_variables,
+    jstring target,
+    jstring runtime,
+    jstring config_file,
+    jobject diagnostics
+) {
+    // Create the scenario variable array
+    ${scn_var_type} *scenario_variables_native = NULL;
+    int scenario_variables_length = 0;
+    if(scenario_variables != NULL) {
+        // Get the scenario variable length
+        scenario_variables_length = (*env)->GetArrayLength(env, scenario_variables);
+        if(scenario_variables_length > 0) {
+
+            // Allocate the scenario variable array
+            int size = scenario_variables_length + 1;
+            scenario_variables_native = (${scn_var_type}*) calloc(
+                (size_t) size,
+                (size_t) sizeof(${scn_var_type})
+            );
+
+            // Unwrap all scenario variables in the native array
+            for(int i = 0; i < scenario_variables_length; i++) {
+                jobject scenario_variable = (*env)->GetObjectArrayElement(
+                    env,
+                    scenario_variables,
+                    (jsize) i
+                );
+                ScenarioVariable_unwrap(
+                    env,
+                    scenario_variable,
+                    &scenario_variables_native[i]
+                );
+            }
+
+        }
+    }
+
+    // Create the common project arguments
+    const char *target_c = target == NULL ? NULL : to_c_string(env, target);
+    const char *runtime_c = runtime == NULL ? NULL : to_c_string(env, runtime);
+    const char *config_file_c = config_file == NULL ? NULL : to_c_string(env, config_file);
+    const int ada_only = 0;
+    ${project_type} res = NULL;
+    ${str_array_type} errors = NULL;
+
+    // If the project file is null, load the project as an implicit one, else
+    // just load the project file.
+    if(project_file == NULL) {
+        ${nat("gpr_project_load_implicit")}(
+            target_c,
+            runtime_c,
+            config_file_c,
+            &res,
+            &errors
+        );
+    } else {
+        const char *project_file_c = to_c_string(env, project_file);
+        ${nat("gpr_project_load")}(
+            project_file_c,
+            scenario_variables_native,
+            target_c,
+            runtime_c,
+            config_file_c,
+            ada_only,
+            &res,
+            &errors
+        );
+        (*env)->ReleaseStringUTFChars(env, project_file, project_file_c);
+    }
+
+    // Free the scenario variables
+    if(scenario_variables_native != NULL) {
+        for(int i = 0; i < scenario_variables_length; i++) {
+            ScenarioVariable_release(scenario_variables_native[i]);
+        }
+        free(scenario_variables_native);
+    }
+
+    // Free the translated strings
+    if (target_c != NULL) {
+        (*env)->ReleaseStringUTFChars(env, target, target_c);
+    }
+    if (runtime_c != NULL) {
+        (*env)->ReleaseStringUTFChars(env, runtime, runtime_c);
+    }
+    if (config_file_c != NULL) {
+        (*env)->ReleaseStringUTFChars(env, config_file, config_file_c);
+    }
+
+    // The `errors` pointer is not allocated if an exception was raised during
+    // project file loading.
+    if (errors != NULL) {
+        // Handle the errors
+        for(int i = 0 ; i < errors->length ; i++) {
+            const char *error = errors->c_ptr[i];
+            jstring j_error = (*env)->NewStringUTF(env, error);
+            add_error_to_diagnostics(env, j_error, diagnostics);
+        }
+
+        // Free the error array
+        ${nat("free_string_array")}(errors);
+    }
+
+    // Return the pointer
+    return PointerWrapper_wrap(env, (void *) res);
+}
+
+// Free a gpr project
+${api.jni_func_sig("gpr_project_free", "void")}(
+    JNIEnv *env,
+    jclass jni_lib,
+    jobject project
+) {
+    // Do the native call
+    ${nat("gpr_project_free")}((${project_type}) get_reference(env, project));
+}
+
+// Get the unit provider from a gpr project
+${api.jni_func_sig("gpr_project_create_unit_provider", "jobject")}(
+    JNIEnv *env,
+    jclass jni_lib,
+    jobject project,
+    jstring subproject
+) {
+    const char* subproject_c = NULL;
+
+    if (subproject != NULL) {
+        subproject_c = (*env)->GetStringUTFChars(env, subproject, NULL);
+    }
+
+    // Call the native function
+    ${unit_provider_type} res = ${nat("gpr_project_create_unit_provider")}(
+        (${project_type}) get_reference(env, project),
+        subproject_c
+    );
+
+    // Free all temporarily allocated memory
+    if (subproject_c != NULL) {
+        (*env)->ReleaseStringUTFChars(env, subproject, subproject_c);
+    }
+
+    // Return the new unit provider
+    return UnitProvider_wrap(env, res);
+}
+
+// Get the list of the files of a project
+${api.jni_func_sig("gpr_project_source_files", "jobjectArray")}(
+    JNIEnv *env,
+    jclass jni_lib,
+    jobject project,
+    jint mode,
+    jobjectArray subprojects
+) {
+    jobjectArray result_java = NULL;
+
+    /* Convert the Java array of subprojects ("subprojects" argument) into the
+       required C array (subproject_count/subprojects_c).  */
+    jsize subproject_count = 0;
+    const char** subprojects_c = NULL;
+
+    if (subprojects != NULL)
+      {
+	subproject_count = (*env)->GetArrayLength (env, subprojects);
+	subprojects_c = calloc (subproject_count, sizeof (char*));
+      }
+
+    for (int i = 0; i < subproject_count; ++i)
+      {
+	jstring subproject
+	  = (jstring) (*env)->GetObjectArrayElement (env, subprojects, i);
+	subprojects_c[i] = (*env)->GetStringUTFChars (env, subproject, NULL);
+      }
+
+    /* Call the C API.  In case of failure, return NULL and let the caller
+       propagate the native exception into the Java world.  */
+    ${str_array_type} result_c = ${nat("gpr_project_source_files")} (
+        (${project_type}) get_reference (env, project),
+        (int) mode,
+        subprojects_c,
+        subproject_count
+    );
+    if (${nat("get_last_exception")} () != NULL)
+      goto error;
+
+    /* Create the Java array result and initialize it.  */
+    jclass clazz = (*env)->FindClass (env, "java/lang/String");
+    result_java
+      = (*env)->NewObjectArray (env, (jsize) result_c->length, clazz, NULL);
+    for (int i = 0 ; i < result_c->length ; i++)
+      {
+        jstring source_file
+	  = to_j_string (env, result_c->c_ptr[i]);
+        (*env)->SetObjectArrayElement (env, result_java, (jsize) i,
+				       (jobject) source_file);
+      }
+
+    /* Now that the Java result is ready, release the C result.  */
+    ${nat("free_string_array")} (result_c);
+
+error:
+    /* Release subprojects_c.  */
+    for (int i = 0; i < subproject_count; ++i)
+      {
+	jstring subproject
+	  = (jstring) (*env)->GetObjectArrayElement(env, subprojects, i);
+	(*env)->ReleaseStringUTFChars (env, subproject, subprojects_c[i]);
+      }
+    free (subprojects_c);
+
+    return result_java;
+}
+
+${c_doc("libadalang.gpr_project_create_context", lang="java")}
+${api.jni_func_sig("gpr_project_create_context", "jobject")}(
+    JNIEnv *env,
+    jclass jni_lib,
+    jobject project,
+    jstring subproject,
+    jobject event_handler,
+    jboolean with_trivia,
+    jint tab_stop
+)
+{
+    const char *subproject_c = NULL;
+    if (subproject != NULL)
+      subproject_c = (*env)->GetStringUTFChars (env, subproject, NULL);
+
+    ${event_handler_type} event_handler_c = NULL;
+    if (event_handler != NULL)
+        event_handler_c = EventHandler_unwrap (env, event_handler);
+
+    /* Manually allocate a C-level analysis context so that we can initialize
+       it ourselves.  */
+    ${analysis_context_type} ctx_c = ${nat("allocate_analysis_context")} ();
+
+    /* Create the Java wrapper, so that we have one ready for event handler
+       callbacks triggered during context initialization.  */
+    jobject ctx = AnalysisContext_wrap (env, ctx_c);
+
+    /* The wrapper created its own ownership share: release ours.  */
+    ${nat("context_decref")} (ctx_c);
+
+    /* TODO: attach extra wrappers to the analysis context wrapper so that
+       wrappers ("project" and "event_handler") live at least as long as the
+       analysis context.  */
+
+    /* Finally, initialize the analysis context. Note that this step may raise
+       an exception: in that case, the analysis context is considered not
+       initialized: release it.  */
+    ${nat("gpr_project_initialize_context")} (
+      (${project_type}) get_reference (env, project),
+      ctx_c,
+      subproject_c,
+      event_handler_c,
+      (int) with_trivia,
+      (int) tab_stop
+    );
+    if (subproject_c != NULL)
+      (*env)->ReleaseStringUTFChars (env, subproject, subproject_c);
+
+    const ${exception_type} *exc_c = ${nat("get_last_exception")} ();
+    if (exc_c != NULL)
+      {
+          jthrowable exc = LangkitException_wrap (env, *exc_c);
+          ${nat("context_decref")} (ctx_c);
+          (*env)->Throw (env, exc);
+      }
+
+    return ctx;
+}
+
+// Create an auto provider reference
+${api.jni_func_sig("create_auto_provider", "jobject")}(
+    JNIEnv *env,
+    jclass jni_lib,
+    jobjectArray source_files,
+    jstring charset
+) {
+    // Retrieve the number of files N
+    jsize source_file_count = (*env)->GetArrayLength(env, source_files);
+
+    // Allocate an array of N+1 element (the last one should be the null pointer),
+    // indicating the end of the C array.
+    const char** source_files_c = calloc(source_file_count + 1, sizeof(char*));
+
+    for (int i = 0; i < source_file_count; ++i) {
+        jstring source_file = (jstring) (*env)->GetObjectArrayElement(
+            env,
+            source_files,
+            i
+        );
+        source_files_c[i] = (*env)->GetStringUTFChars(env, source_file, NULL);
+    }
+
+    const char* charset_c = NULL;
+
+    if (charset != NULL) {
+        charset_c = (*env)->GetStringUTFChars(env, charset, NULL);
+    }
+
+    // Create the auto provider
+    ${unit_provider_type} res = ${nat("create_auto_provider")}(
+        source_files_c, charset_c
+    );
+
+    // Free all temporarily allocated memory
+
+    if (charset_c != NULL) {
+        (*env)->ReleaseStringUTFChars(env, charset, charset_c);
+    }
+
+    for (int i = 0; i < source_file_count; ++i) {
+        jstring source_file = (jstring) (*env)->GetObjectArrayElement(
+            env,
+            source_files,
+            i
+        );
+        (*env)->ReleaseStringUTFChars(env, source_file, source_files_c[i]);
+    }
+    free(source_files_c);
+
+    // Return the new unit provider
+    return UnitProvider_wrap(env, res);
+}
+
+${api.jni_func_sig("set_config_pragmas_mapping", "void")}(
+    JNIEnv *env,
+    jclass jni_lib,
+    jobject context,
+    jobject global_pragmas,
+    jobjectArray local_pragmas
+) {
+  ada_analysis_context context_c;
+  ada_analysis_unit global_pragmas_c;
+  ada_analysis_unit *local_pragmas_c;
+  int i, size;
+
+  context_c = AnalysisContext_unwrap (env, context);
+  global_pragmas_c
+    = (global_pragmas == NULL)
+      ? NULL
+      : AnalysisUnit_unwrap (env, global_pragmas);
+
+  size = (*env)->GetArrayLength (env, local_pragmas);
+  local_pragmas_c = calloc (size, sizeof (ada_analysis_unit));
+  for (i = 0; i < size; ++i)
+    {
+      jobject unit_java
+        = (*env)->GetObjectArrayElement (env, local_pragmas, (jsize) i);
+      ada_analysis_unit unit_c;
+
+      unit_c
+	= (unit_java == NULL) ? NULL : AnalysisUnit_unwrap (env, unit_java);
+      local_pragmas_c[i] = unit_c;
+    }
+
+  ${nat("set_config_pragmas_mapping")} (context_c, global_pragmas_c,
+					local_pragmas_c);
+
+  free (local_pragmas_c);
+}

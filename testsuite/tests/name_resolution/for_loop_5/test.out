@@ -1,0 +1,17 @@
+Analyzing test.adb
+##################
+
+Resolving xrefs for node <ForLoopSpec test.adb:58:14-58:20>
+***********************************************************
+
+Expr: <Id "A" test.adb:58:19-58:20>
+  references:    <DefiningName "A" test.adb:56:19-56:20>
+  type:          <ConcreteTypeDecl ["JSON_Array"] test.adb:26:7-28:18>
+  expected type: None
+
+Resolving xrefs for node <NullStmt test.adb:59:13-59:18>
+********************************************************
+
+
+
+Done.

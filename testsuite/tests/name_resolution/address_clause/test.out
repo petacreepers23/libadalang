@@ -5,23 +5,96 @@ Resolving xrefs for node <AttributeDefClause test.adb:3:4-3:32>
 ***************************************************************
 
 Expr: <AttributeRef test.adb:3:8-3:17>
-  references: None
-  type:       None
+  references:    None
+  type:          <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+  expected type: None
 Expr: <Id "Y" test.adb:3:8-3:9>
-  references: <DefiningName test.adb:2:7-2:8>
-  type:       <TypeDecl ["Integer"] __standard:4:3-4:54>
+  references:    <DefiningName "Y" test.adb:2:7-2:8>
+  type:          <ConcreteTypeDecl ["Integer"] __standard:4:3-4:54>
+  expected type: None
 Expr: <Id "Address" test.adb:3:10-3:17>
-  references: None
-  type:       None
+  references:    None
+  type:          None
+  expected type: None
 Expr: <AttributeRef test.adb:3:22-3:31>
-  references: None
-  type:       <TypeDecl ["Address"] system.ads:67:4-67:28>
+  references:    None
+  type:          <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+  expected type: <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
 Expr: <Id "X" test.adb:3:22-3:23>
-  references: <DefiningName test.adb:2:4-2:5>
-  type:       <TypeDecl ["Integer"] __standard:4:3-4:54>
+  references:    <DefiningName "X" test.adb:2:4-2:5>
+  type:          <ConcreteTypeDecl ["Integer"] __standard:4:3-4:54>
+  expected type: None
 Expr: <Id "Address" test.adb:3:24-3:31>
-  references: None
-  type:       None
+  references:    None
+  type:          None
+  expected type: None
+
+
+Analyzing subp.adb
+##################
+
+Resolving xrefs for node <AttributeDefClause subp.adb:16:10-16:32>
+******************************************************************
+
+Expr: <AttributeRef subp.adb:16:14-16:23>
+  references:    None
+  type:          <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+  expected type: None
+Expr: <Id "C" subp.adb:16:14-16:15>
+  references:    <DefiningName "C" subp.adb:13:20-13:21>
+  type:          None
+  expected type: None
+Expr: <Id "Address" subp.adb:16:16-16:23>
+  references:    None
+  type:          None
+  expected type: None
+Expr: <DottedName subp.adb:16:28-16:31>
+  references:    <DefiningName "A" subp.adb:5:7-5:8>
+  type:          <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+  expected type: <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+Expr: <Id "X" subp.adb:16:28-16:29>
+  references:    <DefiningName "X" subp.adb:10:7-10:8>
+  type:          <ConcreteTypeDecl ["T"] subp.adb:4:4-7:15>
+  expected type: <ConcreteTypeDecl ["T"] subp.adb:4:4-7:15>
+Expr: <Id "A" subp.adb:16:30-16:31>
+  references:    <DefiningName "A" subp.adb:5:7-5:8>
+  type:          <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+  expected type: <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+
+Resolving xrefs for node <IfStmt subp.adb:19:10-21:17>
+******************************************************
+
+Expr: <RelationOp subp.adb:19:13-19:40>
+  type:          <ConcreteTypeDecl ["Boolean"] __standard:3:3-3:33>
+  expected type: <ConcreteTypeDecl ["Boolean"] __standard:3:3-3:33>
+Expr: <AttributeRef subp.adb:19:13-19:27>
+  references:    None
+  type:          <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+  expected type: <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+Expr: <Id "C" subp.adb:19:13-19:14>
+  references:    <DefiningName "C" subp.adb:13:20-13:21>
+  type:          None
+  expected type: None
+Expr: <Id "Code_Address" subp.adb:19:15-19:27>
+  references:    None
+  type:          None
+  expected type: None
+Expr: <OpNeq "/=" subp.adb:19:28-19:30>
+  references:    None
+  type:          None
+  expected type: None
+Expr: <AttributeRef subp.adb:19:31-19:40>
+  references:    None
+  type:          <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+  expected type: <ConcreteTypeDecl ["Address"] system.ads:67:4-67:28>
+Expr: <Id "C" subp.adb:19:31-19:32>
+  references:    <DefiningName "C" subp.adb:13:20-13:21>
+  type:          None
+  expected type: None
+Expr: <Id "Address" subp.adb:19:33-19:40>
+  references:    None
+  type:          None
+  expected type: None
 
 
 Done.

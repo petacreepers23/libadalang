@@ -9,7 +9,8 @@ function Is_Keyword
    Index   : Token_Or_Trivia_Index;
    Version : Language_Version) return Boolean
 is
-   use Libadalang.Common.Precomputed_Symbols;
+   use Libadalang.Implementation;
+   use Libadalang.Implementation.Precomputed_Symbols;
    use Langkit_Support.Symbols;
    use Langkit_Support.Token_Data_Handlers;
 
@@ -50,7 +51,7 @@ begin
                         | +Precomputed_Sym_Synchronized
                         | +Precomputed_Sym_Tagged
                         | +Precomputed_Sym_Until;
-         when Ada_2012 =>
+         when Ada_2012 | Ada_2022 =>
             return Sym in +Precomputed_Sym_Abstract
                         | +Precomputed_Sym_Interface
                         | +Precomputed_Sym_Overriding

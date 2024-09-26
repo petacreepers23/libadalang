@@ -1,11 +1,13 @@
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO;           use Ada.Text_IO;
 
-with GNAT.OS_Lib; use GNAT.OS_Lib;
-
 with GNATCOLL.Opt_Parse;
-with GNATCOLL.Projects; use GNATCOLL.Projects;
-with GNATCOLL.VFS;      use GNATCOLL.VFS;
+with GNATCOLL.OS;
+with GNATCOLL.OS.Process; use GNATCOLL.OS.Process;
+with GNATCOLL.VFS;        use GNATCOLL.VFS;
+with GPR2.Build.Source;
+with GPR2.Project.Tree;
+with GPR2.Project.View;
 
 with Langkit_Support.Slocs; use Langkit_Support.Slocs;
 with Libadalang.Analysis;   use Libadalang.Analysis;
@@ -73,19 +75,23 @@ procedure GNAT_Compare is
       package Skip_Build is new Parse_Flag
         (App.Args.Parser, "-b", "--skip-build",
          "Skip the build of the project to process");
+
+      package Skip_GPRclean is new Parse_Flag
+        (App.Args.Parser, "-sc", "--skip-gprclean",
+         "Skip the run of gprclean at the end of gnat_compare execution");
    end Args;
 
-   Enabled : Comparison_Set := (others => True);
+   Enabled : Comparison_Set := [others => True];
    --  For each kind of xrefs difference, determine whether we should report it
 
-   Count_Enabled : Comparison_Set := (others => True);
+   Count_Enabled : Comparison_Set := [others => True];
    --  For each kind of xrefs difference, say whether we should compute stats
    --  about it.
 
    GNAT_Xref_Count : Natural := 0;
    --  Number of Xrefs entries in GNAT (total)
 
-   Counts : array (Comparison_Type) of Natural := (others => 0);
+   Counts : array (Comparison_Type) of Natural := [others => 0];
    --  For each kind of xrefs difference, hit count
 
    Show_Nodes     : Boolean := False;
@@ -109,13 +115,16 @@ procedure GNAT_Compare is
    procedure Run_GPRbuild (Project_File : String);
    --  Run "gprbuild" on Project_File
 
+   procedure Run_GPRclean (Project_File : String);
+   --  Run "gprclean" on Project_File
+
    procedure Load_All_Xrefs_From_LI
-     (Project      : Project_Tree'Class;
+     (Tree         : GPR2.Project.Tree.Object;
       Files        : in out File_Table_Type;
       Xrefs        : out Unit_Xrefs_Vectors.Vector;
       Source_Files : String_Vectors.Vector);
-   --  Go through all library files in Project and read the xref information
-   --  they contain. Build the Xrefs database from it.
+   --  Go through all library files in Tree and read the xref information they
+   --  contain. Build the Xrefs database from it.
    --
    --  Register only xrefs for references that come from files in Source_Files.
    --  Use all references if Source_Files is empty.
@@ -128,8 +137,9 @@ procedure GNAT_Compare is
    --  resolve all xrefs. Compare both, reporting the differences using the
    --  Report procedure above.
 
-   function Get_Project (Context : App_Job_Context) return Project_Tree_Access;
-   --  If a project file was loaded, return it. Return null otherwise.
+   function Get_Project
+     (Context : App_Job_Context) return GPR2.Project.Tree.Object;
+   --  If a project file was loaded, return it. Return ``Undefined`` otherwise
 
    -------------
    -- Convert --
@@ -137,7 +147,7 @@ procedure GNAT_Compare is
 
    function Convert (Arg : String) return Comparison_Set is
    begin
-      return Result : Comparison_Set := (others => False) do
+      return Result : Comparison_Set := [others => True] do
          for C of Arg loop
             declare
                Comp : constant Comparison_Type :=
@@ -160,13 +170,14 @@ procedure GNAT_Compare is
    -- Get_Project --
    -----------------
 
-   function Get_Project (Context : App_Job_Context) return Project_Tree_Access
+   function Get_Project
+     (Context : App_Job_Context) return GPR2.Project.Tree.Object
    is
       Provider : Source_Provider renames Context.App_Ctx.Provider;
    begin
       return (if Provider.Kind = Project_File
               then Provider.Project
-              else null);
+              else GPR2.Project.Tree.Undefined);
    end Get_Project;
 
    ---------------
@@ -174,10 +185,11 @@ procedure GNAT_Compare is
    ---------------
 
    procedure Job_Setup (Context : App_Job_Context) is
-      Project      : constant Project_Tree_Access := Get_Project (Context);
+      Tree         : constant GPR2.Project.Tree.Object :=
+        Get_Project (Context);
       Project_File : constant String := To_String (App.Args.Project_File.Get);
    begin
-      if Project = null then
+      if not Tree.Is_Defined then
          Abort_App ("Please provide a project file (-P/--project).");
       end if;
 
@@ -202,7 +214,7 @@ procedure GNAT_Compare is
       if Project_File /= "" and then not Args.Skip_Build.Get then
          Run_GPRbuild (Project_File);
       end if;
-      Load_All_Xrefs_From_LI (Project.all, Files, LI_Xrefs, Source_Files);
+      Load_All_Xrefs_From_LI (Tree, Files, LI_Xrefs, Source_Files);
    end Job_Setup;
 
    ----------------------
@@ -210,35 +222,43 @@ procedure GNAT_Compare is
    ----------------------
 
    procedure Job_Post_Process (Context : App_Job_Context) is
-      Prj : constant Project_Type := Get_Project (Context).Root_Project;
+      View : constant GPR2.Project.View.Object :=
+        Get_Project (Context).Root_Project;
    begin
       --  Browse this database and compare it to what LAL can resolve
 
       Sort (Files, LI_Xrefs);
       for Unit_Xrefs of LI_Xrefs loop
          declare
-            Name : constant String := Filename (Files, Unit_Xrefs.Unit);
-            Path : constant String :=
-              +Prj.Create_From_Project (+Name).File.Full_Name;
-            Unit : constant Analysis_Unit :=
-               Context.Analysis_Ctx.Get_From_File (Path);
+            Name   : constant String := Filename (Files, Unit_Xrefs.Unit);
+            Source : constant GPR2.Build.Source.Object :=
+              View.Visible_Source (GPR2.Simple_Name (Name));
+            Unit   : Analysis_Unit;
          begin
             Put_Line ("== " & Name & " ==");
 
-            if Unit.Has_Diagnostics then
-               for D of Unit.Diagnostics loop
-                  Put_Line (Standard_Error, Unit.Format_GNU_Diagnostic (D));
-               end loop;
-               Abort_App;
+            if Source.Is_Defined then
+               Unit := Context.Analysis_Ctx.Get_From_File
+                         (String (Source.Path_Name.Value));
+
+               if Unit.Has_Diagnostics then
+                  for D of Unit.Diagnostics loop
+                     Put_Line (Standard_Error, Unit.Format_GNU_Diagnostic (D));
+                  end loop;
+                  Abort_App;
+               end if;
+
+               Sort (Files, Unit_Xrefs.Xrefs);
+               Remove_Duplicates (Unit_Xrefs.Xrefs);
+
+               GNAT_Xref_Count :=
+                 GNAT_Xref_Count + Natural (Unit_Xrefs.Xrefs.Length);
+
+               Compare_Xrefs (Files, Root (Unit), Unit_Xrefs.Xrefs);
+            else
+               Put_Line ("warning: could not locate source file: " & Name);
+               Put_Line ("warning: discarding results for it");
             end if;
-
-            Sort (Files, Unit_Xrefs.Xrefs);
-            Remove_Duplicates (Unit_Xrefs.Xrefs);
-
-            GNAT_Xref_Count :=
-              GNAT_Xref_Count + Natural (Unit_Xrefs.Xrefs.Length);
-
-            Compare_Xrefs (Files, Root (Unit), Unit_Xrefs.Xrefs);
             Free (Unit_Xrefs);
          end;
       end loop;
@@ -269,6 +289,15 @@ procedure GNAT_Compare is
             end if;
          end loop;
       end if;
+
+      if not Args.Skip_GPRclean.Get then
+         declare
+            Project_File : constant String :=
+               To_String (App.Args.Project_File.Get);
+         begin
+            Run_GPRclean (Project_File);
+         end;
+      end if;
    end Job_Post_Process;
 
    ------------------
@@ -276,66 +305,88 @@ procedure GNAT_Compare is
    ------------------
 
    procedure Run_GPRbuild (Project_File : String) is
-      Path    : GNAT.OS_Lib.String_Access := Locate_Exec_On_Path ("gprbuild");
-      Args    : String_Vectors.Vector;
-      Success : Boolean;
+      Args    : GNATCOLL.OS.Process.Argument_List;
+      Success : Integer;
    begin
-      if Path = null then
-         Put_Line ("Could not locate gprbuild on the PATH");
-      end if;
-
+      Args.Append ("gprbuild");
+      Args.Append (+"-c");
       Args.Append (+"-q");
       Args.Append (+"-p");
       Args.Append (+"-P" & Project_File);
       for V of App.Args.Scenario_Vars.Get loop
-         Args.Append ("-X" & V);
+         Args.Append ("-X" & To_String (V));
       end loop;
 
-      declare
-         Spawn_Args : String_List_Access :=
-           new String_List'(To_String_List (Args));
-      begin
-         Spawn (Path.all, Spawn_Args.all, Success);
-         Free (Spawn_Args);
-         Free (Path);
-      end;
+      Success := GNATCOLL.OS.Process.Run
+        (Args, "", FS.Standin, FS.Standerr, FS.Null_FD, INHERIT);
 
-      if not Success then
+      if Success /= 0 then
          Abort_App ("Could not spawn gprbuild");
       end if;
    end Run_GPRbuild;
+
+   ------------------
+   -- Run_GPRbuild --
+   ------------------
+
+   procedure Run_GPRclean (Project_File : String) is
+      Args    : GNATCOLL.OS.Process.Argument_List;
+      Success : Integer;
+   begin
+      Args.Append ("gprclean");
+      Args.Append (+"-q");
+      Args.Append (+"-r");
+      Args.Append (+"-P" & Project_File);
+      for V of App.Args.Scenario_Vars.Get loop
+         Args.Append ("-X" & To_String (V));
+      end loop;
+
+      Success := GNATCOLL.OS.Process.Run
+        (Args, "", FS.Standin, FS.Standerr, FS.Null_FD, INHERIT);
+
+      if Success /= 0 then
+         Abort_App ("Could not spawn gprclean");
+      end if;
+   end Run_GPRclean;
 
    ----------------------------
    -- Load_All_Xrefs_From_LI --
    ----------------------------
 
    procedure Load_All_Xrefs_From_LI
-     (Project      : Project_Tree'Class;
+     (Tree         : GPR2.Project.Tree.Object;
       Files        : in out File_Table_Type;
       Xrefs        : out Unit_Xrefs_Vectors.Vector;
       Source_Files : String_Vectors.Vector)
    is
-      LIs : Library_Info_List;
+      View : constant GPR2.Project.View.Object := Tree.Root_Project;
    begin
-      Project.Root_Project.Library_Files (List => LIs);
-      for LI of LIs loop
-         declare
-            LI_Filename : constant String := +Full_Name (LI.Library_File);
-            New_Xrefs   : Unit_Xrefs_Vectors.Vector;
-         begin
-            Read_LI_Xrefs (LI_Filename, Files, New_Xrefs);
-            for NX of New_Xrefs loop
-               if Source_Files.Is_Empty
-                 or else Source_Files.Contains (+Filename (Files, NX.Unit))
-               then
-                  Xrefs.Append (NX);
-               else
-                  Free (NX);
-               end if;
-            end loop;
-         end;
-      end loop;
-      LIs.Clear;
+      if View.Kind not in GPR2.With_Object_Dir_Kind then
+         return;
+      end if;
+
+      declare
+         Filenames : File_Array_Access :=
+           View.Object_Directory.Virtual_File.Read_Dir (Files_Only);
+         New_Xrefs : Unit_Xrefs_Vectors.Vector;
+      begin
+         for F of Filenames.all loop
+            if F.File_Extension = ".ali" then
+               New_Xrefs.Clear;
+               Read_LI_Xrefs (+F.Full_Name, Files, New_Xrefs);
+               for NX of New_Xrefs loop
+                  if Source_Files.Is_Empty
+                    or else Source_Files.Contains (+Filename (Files, NX.Unit))
+                  then
+                     Xrefs.Append (NX);
+                  else
+                     Free (NX);
+                  end if;
+               end loop;
+            end if;
+         end loop;
+         Unchecked_Free (Filenames);
+      end;
    end Load_All_Xrefs_From_LI;
 
    -------------------
@@ -372,7 +423,7 @@ procedure GNAT_Compare is
 
       function Traverse (Node : Ada_Node'Class) return Visit_Status is
          Ref  : Defining_Name;
-         Rel  : Single_Tok_Node;
+         Rel  : Libadalang.Analysis.Name;
          Xref : Xref_Type;
       begin
          --  GNAT only considers leaf items for xrefs, so skip for instance
@@ -449,7 +500,7 @@ procedure GNAT_Compare is
          if not Ref.Is_Null then
             for Wrapper of Xrefs_Wrapper.Post_Wrappers loop
                declare
-                  Wrapped_Ref : constant Defining_Name := Wrapper (Ref);
+                  Wrapped_Ref : constant Defining_Name := Wrapper (Node, Ref);
                begin
                   if not Wrapped_Ref.Is_Null then
                      return Wrapped_Ref;

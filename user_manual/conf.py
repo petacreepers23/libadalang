@@ -25,7 +25,9 @@
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
+from docutils import nodes
 import os
+import sphinx_rtd_theme
 
 extensions = [
     'sphinx.ext.autodoc',
@@ -51,7 +53,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'Libadalang User Manual'
-copyright = u'2014-2018, AdaCore'
+copyright = u'2014-2023, AdaCore'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -81,7 +83,7 @@ if libadalang.version:
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
-exclude_patterns = ['_build']
+exclude_patterns = ['_build', 'generated']
 
 # The reST default role (used for this markup: `text`) to use for all
 # documents.
@@ -112,18 +114,17 @@ pygments_style = 'sphinx'
 
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
-if os.environ.get('USE_SPHINX_RTD_THEME'):
-    import sphinx_rtd_theme
-    html_theme = "sphinx_rtd_theme"
-    html_theme_path = sphinx_rtd_theme.get_html_theme_path()
-else:
-    html_theme = 'sphinxdoc'
+html_theme = "sphinx_rtd_theme"
+html_theme_path = sphinx_rtd_theme.get_html_theme_path()
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
-#html_theme_options = {}
-
+# https://sphinx-rtd-theme.readthedocs.io/en/stable/configuring.html#theme-options
+html_theme_options = {
+    # Use AdaCore blue in the Table Of Content
+    "style_nav_header_background": "#12284c",
+}
 # Add any paths that contain custom themes here, relative to this directory.
 #html_theme_path = []
 
@@ -136,12 +137,12 @@ else:
 
 # The name of an image file (relative to this directory) to place at the top
 # of the sidebar.
-#html_logo = None
+html_logo = "adacore-logo-white.png"
 
 # The name of an image file (within the static path) to use as favicon of the
 # docs.  This file should be a Windows icon file (.ico) being 16x16 or 32x32
 # pixels large.
-#html_favicon = None
+html_favicon = "favicon.ico"
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -283,7 +284,7 @@ texinfo_documents = [
 epub_title = u'libadalang'
 epub_author = u'AdaCore'
 epub_publisher = u'AdaCore'
-epub_copyright = u'2014-2018, AdaCore'
+epub_copyright = u'2014-2023, AdaCore'
 
 # The basename for the epub file. It defaults to the project name.
 #epub_basename = u'libadalang'
@@ -346,6 +347,7 @@ epub_exclude_files = ['search.html']
 # If false, no index is generated.
 #epub_use_index = True
 
+
 def setup(app):
     """
     This hook will be automatically executed when building the documentation.
@@ -370,6 +372,11 @@ def setup(app):
         import laldoc
         app.add_directive('ada_auto_package', laldoc.AutoPackage)
 
+    from sphinxcontrib import adadomain
+    # Register the rmlink role at the toplevel, so that we can reference the RM
+    # everywhere, including in the Python API ref.
+    app.add_role('rmlink', adadomain.rmlink)
+
     import subprocess
     from os import path as P
     import sys
@@ -384,6 +391,11 @@ def setup(app):
         f.write(rst_content)
 
 
-# TODO: for deployment, update the following URL to an available Langkit
-# documentation site.
-extlinks = {'langkit_doc': ('http://example.org/langkit-doc/%s', None)}
+extlinks = {
+    # TODO: for deployment, update the following URL to an available Langkit
+    # documentation site.
+    'langkit_doc': ('http://example.org/langkit-doc/%s', None),
+
+    'gnat_rm': ('https://docs.adacore.com/gnat_rm-docs/html/gnat_rm'
+                '/gnat_rm/gnat_language_extensions.html#%s', None)
+}

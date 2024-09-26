@@ -11,19 +11,22 @@ with Ada.Unchecked_Deallocation;
 with GNAT.Traceback.Symbolic;
 
 with GNATCOLL.JSON;
-with GNATCOLL.Memory;
+with GNATCOLL.Memory; use GNATCOLL.Memory;
 with GNATCOLL.Opt_Parse;
-with GNATCOLL.VFS; use GNATCOLL.VFS;
+with GNATCOLL.VFS;    use GNATCOLL.VFS;
 
-with Langkit_Support.Adalog.Debug;   use Langkit_Support.Adalog.Debug;
+with Langkit_Support.Adalog.Debug; use Langkit_Support.Adalog.Debug;
+with Langkit_Support.Diagnostics;
+with Langkit_Support.Diagnostics.Output;
 with Langkit_Support.Lexical_Envs;
-with Langkit_Support.Slocs;          use Langkit_Support.Slocs;
-with Langkit_Support.Text;           use Langkit_Support.Text;
+with Langkit_Support.Slocs;        use Langkit_Support.Slocs;
+with Langkit_Support.Text;         use Langkit_Support.Text;
 
-with Libadalang.Analysis;  use Libadalang.Analysis;
-with Libadalang.Common;    use Libadalang.Common;
-with Libadalang.Helpers;   use Libadalang.Helpers;
-with Libadalang.Iterators; use Libadalang.Iterators;
+with Libadalang.Analysis;             use Libadalang.Analysis;
+with Libadalang.Common;               use Libadalang.Common;
+with Libadalang.Helpers;              use Libadalang.Helpers;
+with Libadalang.Iterators;            use Libadalang.Iterators;
+with Libadalang.Semantic_Diagnostics; use Libadalang.Semantic_Diagnostics;
 
 with Put_Title;
 
@@ -31,18 +34,26 @@ procedure Nameres is
 
    package J renames GNATCOLL.JSON;
 
-   type Stats_Record is record
-      Nb_Files_Analyzed    : Natural := 0;
-      Nb_Successes         : Natural := 0;
-      Nb_Fails             : Natural := 0;
-      Nb_Xfails            : Natural := 0;
-      Nb_Exception_Fails   : Natural := 0;
-      Max_Nb_Fails         : Natural := 0;
-      File_With_Most_Fails : Unbounded_String;
+   type File_Stats_Record is record
+      Filename           : Unbounded_String;
+      Nb_Successes       : Natural  := 0;
+      Nb_Fails           : Natural  := 0;
+      Nb_Xfails          : Natural  := 0;
+      Nb_Total           : Natural  := 0;
+      Processing_Time    : Duration := 0.0;
+      Resolution_Speed   : Float    := 0.0;
    end record;
 
-   procedure Merge (Stats : in out Stats_Record; Other : Stats_Record);
-   --  Merge data from Stats and Other into Stats
+   package File_Stats_Vectors is new Ada.Containers.Vectors
+     (Positive, File_Stats_Record);
+
+   type Stats_Record is record
+      File_Stats : File_Stats_Vectors.Vector;
+   end record;
+
+   Number_Of_Slowest_Files_To_Print : constant := 5;
+   --  The maximum number of files for which to print the resolution
+   --  speed when using ``--stats``.
 
    type Config_Record is record
       Display_Slocs : Boolean := False;
@@ -83,7 +94,7 @@ procedure Nameres is
    Job_Data   : Job_Data_Array_Access;
 
    Time_Start : Time;
-   --  Time at which the app starts, when Args.Time is set
+   --  Time at which the app starts
 
    procedure App_Setup (Context : App_Context; Jobs : App_Job_Context_Array);
    procedure Job_Setup (Context : App_Job_Context);
@@ -92,16 +103,19 @@ procedure Nameres is
    procedure App_Post_Process
      (Context : App_Context; Jobs : App_Job_Context_Array);
 
+   procedure Print_Stats (Jobs : App_Job_Context_Array);
+
    package App is new Libadalang.Helpers.App
-     (Name               => "nameres",
-      Description        =>
+     (Name                   => "nameres",
+      Description            =>
          "Run Libadalang's name resolution on a file, set of files or project",
-      Enable_Parallelism => True,
-      App_Setup          => App_Setup,
-      Job_Setup          => Job_Setup,
-      Process_Unit       => Process_Unit,
-      Job_Post_Process   => Job_Post_Process,
-      App_Post_Process   => App_Post_Process);
+      Enable_Parallelism     => True,
+      GPR_Absent_Dir_Warning => False,
+      App_Setup              => App_Setup,
+      Job_Setup              => Job_Setup,
+      Process_Unit           => Process_Unit,
+      Job_Post_Process       => Job_Post_Process,
+      App_Post_Process       => App_Post_Process);
 
    package Args is
       use GNATCOLL.Opt_Parse;
@@ -128,13 +142,23 @@ procedure Nameres is
       package Resolve_All is new Parse_Flag
         (App.Args.Parser, "-A", "--all", "Resolve every cross reference");
 
+      package Traverse_Generics is new Parse_Flag
+        (App.Args.Parser, "-G", "--traverse-generics",
+         "Traverse generic instantiations");
+
       package Solve_Line is new Parse_Option
         (App.Args.Parser, "-L", "--solve-line", "Only analyze line N",
          Natural, Default_Val => 0);
 
       package Only_Show_Failures is new Parse_Flag
         (App.Args.Parser, Long => "--only-show-failures",
-         Help => "Only output failures on stdout");
+         Help => "Only output failures on stdout. Note that this triggers"
+                 & " failures logging even when --quiet is passed.");
+
+      package No_Abort_On_Failures is new Parse_Flag
+        (App.Args.Parser, Long => "--no-abort-on-failures",
+         Help => "Expected name resolution failures: do not call Abort_App"
+                 & " if some name resolution failed");
 
       package Imprecise_Fallback is new Parse_Flag
         (App.Args.Parser, Long => "--imprecise-fallback",
@@ -152,13 +176,6 @@ procedure Nameres is
         (App.Args.Parser,
          Long => "--reparse",
          Help => "Reparse units 10 times (hardening)");
-
-      package Time is new Parse_Flag
-        (App.Args.Parser,
-         Long  => "--time",
-         Short => "-T",
-         Help  => "Show the time it took to nameres each file. "
-                  & "Implies --quiet so that you only have timing info");
 
       package Memory is new Parse_Flag
         (App.Args.Parser,
@@ -179,10 +196,6 @@ procedure Nameres is
          Default_Val => Langkit_Support.Lexical_Envs.Full,
          Help        => "Set the lookup cache mode (ADVANCED)");
 
-      package Trace is new Parse_Flag
-        (App.Args.Parser, "-T", "--trace",
-         Help => "Trace logic equation solving");
-
       package Debug is new Parse_Flag
         (App.Args.Parser, "-D", "--debug",
          Help => "Debug logic equation solving");
@@ -199,7 +212,7 @@ procedure Nameres is
       else Args.Lookup_Cache_Mode.Get);
 
    function Quiet return Boolean is
-      (Args.Quiet.Get or else Args.JSON.Get or else Args.Time.Get);
+      (Args.Quiet.Get or else Args.JSON.Get);
 
    function Text (N : Ada_Node'Class) return String is (Image (Text (N)));
 
@@ -220,6 +233,14 @@ procedure Nameres is
 
    function Decode_Boolean_Literal (T : Text_Type) return Boolean is
      (Boolean'Wide_Wide_Value (T));
+
+   procedure Emit_Diagnostics
+     (Origin      : Ada_Node;
+      Diagnostics : Solver_Diagnostic_Array);
+   --  Process the raw nameres diagnostics by formatting them using an
+   --  aggregator and a node renderer (see the implementation). Output them
+   --  to the standard output after that.
+
    procedure Process_File
      (Job_Data : in out Job_Data_Record;
       Unit     : Analysis_Unit;
@@ -244,6 +265,11 @@ procedure Nameres is
    --  ``Args.JSON`` is set, also set fields in ``Obj``.
 
    procedure Increment (Counter : in out Natural);
+
+   function Relative_File_Path (Absolute_Path : String) return String is
+     (+Create (+Absolute_Path).Relative_Path (Get_Current_Dir));
+   --  Given the absolute path to a file, return it as a relative
+   --  path from the current directory.
 
    type Supported_Pragma is
      (Ignored_Pragma, Error_In_Pragma, Pragma_Config, Pragma_Section,
@@ -275,20 +301,21 @@ procedure Nameres is
             Test_Debug : Boolean;
 
          when Pragma_Test_Statement
-            | Pragma_Test_Statement_UID
-            | Pragma_Test_Block
-         =>
+            | Pragma_Test_Statement_UID =>
             --  Run name resolution on the statement that precedes this pragma.
             --
             --  For the UID version, but show the unique_identifying name of
             --  the declarations instead of the node image.  This is used in
             --  case the node might change (for example in tests where we
             --  resolve runtime things).
-            --
-            --  For the block version, run name resolution on all xref entry
-            --  points in the statement that precedes this pragma, or on the
-            --  whole compilation unit if top-level.
-            Test_Target : Ada_Node;
+            Target_Stmt : Ada_Node;
+            Expect_Fail : Boolean;
+
+         when Pragma_Test_Block =>
+            --  Run name resolution on all xref entry points in the statement
+            --  that precedes this pragma, or on the whole compilation unit if
+            --  top-level.
+            Target_Block : Ada_Node;
 
          when Pragma_Find_All_References =>
             --  Run the find-all-references property designated by Refs_Kind on
@@ -304,26 +331,6 @@ procedure Nameres is
    end record;
 
    function Decode_Pragma (Node : Pragma_Node) return Decoded_Pragma;
-
-   -----------
-   -- Merge --
-   -----------
-
-   procedure Merge (Stats : in out Stats_Record; Other : Stats_Record) is
-   begin
-      Stats.Nb_Files_Analyzed :=
-         Stats.Nb_Files_Analyzed + Other.Nb_Files_Analyzed;
-      Stats.Nb_Successes := Stats.Nb_Successes + Other.Nb_Successes;
-      Stats.Nb_Fails := Stats.Nb_Fails + Other.Nb_Fails;
-      Stats.Nb_Xfails := Stats.Nb_Xfails + Other.Nb_Xfails;
-      Stats.Nb_Exception_Fails :=
-         Stats.Nb_Exception_Fails + Other.Nb_Exception_Fails;
-
-      if Stats.Max_Nb_Fails < Other.Max_Nb_Fails then
-         Stats.Max_Nb_Fails := Other.Max_Nb_Fails;
-         Stats.File_With_Most_Fails := Other.File_With_Most_Fails;
-      end if;
-   end Merge;
 
    --------------
    -- New_Line --
@@ -364,7 +371,9 @@ procedure Nameres is
      (E   : Ada.Exceptions.Exception_Occurrence;
       Obj : in out J.JSON_Value) is
    begin
-      App.Dump_Exception (E);
+      if not Quiet or else Args.Only_Show_Failures.Get then
+         App.Dump_Exception (E);
+      end if;
 
       if Args.JSON.Get then
          Obj.Set_Field ("success", False);
@@ -402,7 +411,10 @@ procedure Nameres is
 
       Name         : constant String := Text (Node.F_Id);
       Untyped_Args : constant Ada_Node_Array := Node.F_Args.Children;
-      Args         : array (Untyped_Args'Range) of Pragma_Argument_Assoc;
+
+      type Args_Array is array (Untyped_Args'Range) of Pragma_Argument_Assoc;
+
+      Args : Args_Array;
 
       function Error (Message : String) return Decoded_Pragma
       is ((Error_In_Pragma, Start_Sloc (Node.Sloc_Range), +Message));
@@ -417,6 +429,51 @@ procedure Nameres is
                  & " pragma arguments, got" & Args'Length'Image));
       --  Return an Error_In_Pragma record for an unexpected number of pragma
       --  arguments.
+      function Decode_Pragma_With_Expect_Fail_Argument
+        (Kind : Supported_Pragma;
+         Target : Ada_Node;
+         Args : Args_Array) return Decoded_Pragma;
+      --  Decode a Pragma that can have one `Expect_Fail` argument (i.e.
+      --  Test_Statement or Test_Statement_UID).
+
+      ---------------------------------------------
+      -- Decode_Pragma_With_Expect_Fail_Argument --
+      ---------------------------------------------
+
+      function Decode_Pragma_With_Expect_Fail_Argument
+        (Kind : Supported_Pragma;
+         Target : Ada_Node;
+         Args : Args_Array) return Decoded_Pragma
+      is
+         Expect_Fail : Boolean := False;
+      begin
+         if Args'Length not in 0 .. 1 then
+            return N_Args_Error (0, 1);
+         end if;
+
+         if Args'Length = 1 then
+            declare
+               pragma Assert (Args (1).F_Name.Kind = Ada_Identifier);
+               Name : constant Text_Type := Args (1).F_Name.Text;
+               Expr : constant Text_Type := Args (1).F_Expr.Text;
+            begin
+               if Name = "Expect_Fail" then
+                  Expect_Fail := Decode_Boolean_Literal (Expr);
+               else
+                  return Error ("Expect `Expect_Fail` argument, got: "
+                                & Image (Name));
+               end if;
+            end;
+         end if;
+
+         if Kind = Pragma_Test_Statement then
+            return (Pragma_Test_Statement, Target, Expect_Fail);
+         elsif Kind = Pragma_Test_Statement_UID then
+            return (Pragma_Test_Statement_UID, Target, Expect_Fail);
+         else
+            return Error ("Unsupported pragma kind: " & Kind'Image);
+         end if;
+      end Decode_Pragma_With_Expect_Fail_Argument;
 
    begin
       for I in Untyped_Args'Range loop
@@ -480,16 +537,12 @@ procedure Nameres is
          end;
 
       elsif Name = "Test_Statement" then
-         if Args'Length /= 0 then
-            return N_Args_Error (0);
-         end if;
-         return (Pragma_Test_Statement, Node.Previous_Sibling);
+         return Decode_Pragma_With_Expect_Fail_Argument
+           (Pragma_Test_Statement, Node.Previous_Sibling, Args);
 
       elsif Name = "Test_Statement_UID" then
-         if Args'Length /= 0 then
-            return N_Args_Error (0);
-         end if;
-         return (Pragma_Test_Statement_UID, Node.Previous_Sibling);
+         return Decode_Pragma_With_Expect_Fail_Argument
+           (Pragma_Test_Statement_UID, Node.Previous_Sibling, Args);
 
       elsif Name = "Test_Block" then
          if Args'Length /= 0 then
@@ -680,15 +733,14 @@ procedure Nameres is
 
       Set_Lookup_Cache_Mode (Lookup_Cache_Mode);
 
-      if Args.Trace.Get then
+      if Args.Debug.Get then
+         Langkit_Support.Adalog.Solver_Trace.Set_Active (True);
+         Langkit_Support.Adalog.Solv_Trace.Set_Active (True);
+         Langkit_Support.Adalog.Sol_Trace.Set_Active (True);
          Set_Debug_State (Trace);
-      elsif Args.Debug.Get then
-         Set_Debug_State (Step);
       end if;
 
-      if Args.Time.Get then
-         Time_Start := Clock;
-      end if;
+      Time_Start := Clock;
 
       Job_Data := new Job_Data_Array'(Jobs'Range => (others => <>));
    end App_Setup;
@@ -712,14 +764,10 @@ procedure Nameres is
    procedure Process_Unit (Context : App_Job_Context; Unit : Analysis_Unit) is
       Job_Data : Job_Data_Record renames Nameres.Job_Data (Context.ID);
       Basename : constant String := +Create (+Unit.Get_Filename).Base_Name;
-
-      Before, After : Time;
-      Time_Elapsed  : Duration;
    begin
       if not Quiet then
          Put_Title ('#', "Analyzing " & Basename);
       end if;
-      Before := Clock;
 
       begin
          Process_File (Job_Data, Unit, Unit.Get_Filename);
@@ -729,24 +777,64 @@ procedure Nameres is
             App.Dump_Exception (E);
             return;
       end;
-      After := Clock;
 
-      Time_Elapsed := After - Before;
-
-      if Args.Time.Get then
-         Ada.Text_IO.Put_Line
-           ("Time elapsed in process file for "
-            & Basename & ": " & Time_Elapsed'Image);
-      end if;
-
-      Increment (Job_Data.Stats.Nb_Files_Analyzed);
       if Args.File_Limit.Get /= -1
-         and then Job_Data.Stats.Nb_Files_Analyzed
+         and then Natural (Job_Data.Stats.File_Stats.Length)
                   >= Args.File_Limit.Get
       then
          Abort_App ("Requested file limit reached: aborting");
       end if;
    end Process_Unit;
+
+   ----------------------
+   -- Emit_Diagnostics --
+   ----------------------
+
+   procedure Emit_Diagnostics
+     (Origin      : Ada_Node;
+      Diagnostics : Solver_Diagnostic_Array)
+   is
+      procedure Emit_Located_Message
+        (Message : Located_Message;
+         Style   : Langkit_Support.Diagnostics.Output.Diagnostic_Style);
+      --  Print the given location message using Langkit's ``Outputs`` package
+      --  for diagnostics.
+
+      --------------------------
+      -- Emit_Located_Message --
+      --------------------------
+
+      procedure Emit_Located_Message
+        (Message : Located_Message;
+         Style   : Langkit_Support.Diagnostics.Output.Diagnostic_Style)
+      is
+         Diag : constant Langkit_Support.Diagnostics.Diagnostic :=
+           Langkit_Support.Diagnostics.Create
+             (Message.Location.Sloc_Range, To_Text (Message.Message));
+      begin
+         Langkit_Support.Diagnostics.Output.Print_Diagnostic
+           (Diag,
+            Message.Location.Unit,
+            +Create (+Message.Location.Unit.Get_Filename).Base_Name,
+            Style);
+      end Emit_Located_Message;
+
+      Ctx_Diag : constant Contextual_Diagnostic := Build_Contextual_Diagnostics
+        (Origin,
+         Diagnostics,
+         Basic_Aggregator'Access,
+         Basic_Node_Renderer'Access);
+   begin
+      Emit_Located_Message
+        (Ctx_Diag.Error,
+         Langkit_Support.Diagnostics.Output.Default_Diagnostic_Style);
+
+      for Info_Diag of Ctx_Diag.Contexts loop
+         Emit_Located_Message
+           (Info_Diag,
+            Langkit_Support.Diagnostics.Output.Info_Diagnostic_Style);
+      end loop;
+   end Emit_Diagnostics;
 
    ------------------
    -- Process_File --
@@ -757,9 +845,12 @@ procedure Nameres is
       Unit     : Analysis_Unit;
       Filename : String)
    is
-      Nb_File_Fails : Natural := 0;
-      --  Number of name resolution failures not covered by XFAILs we had in
-      --  this file.
+      Start : constant Time := Clock;
+      --  Time before processing the file
+
+      Stats : File_Stats_Record := (Filename => +Filename, others => <>);
+      --  Stats for this file, to be added to ``Job_Data`` at the end if
+      --  successfully returning.
 
       Config : Config_Record renames Job_Data.Config;
 
@@ -774,7 +865,11 @@ procedure Nameres is
       --  Decode a pragma node and run actions accordingly (trigger name
       --  resolution, output a section name, ...).
 
-      procedure Resolve_Node (Node : Ada_Node; Show_Slocs : Boolean := True);
+      procedure Resolve_Node
+        (Node                     : Ada_Node;
+         Show_Slocs               : Boolean := True;
+         In_Generic_Instantiation : Boolean := False;
+         Expect_Fail              : Boolean := False);
       --  Run name resolution testing on Node.
       --
       --  This involves running P_Resolve_Names on Node, displaying resolved
@@ -790,7 +885,9 @@ procedure Nameres is
       --  Return whether we should use N as an entry point for name resolution
       --  testing.
 
-      procedure Resolve_Block (Block : Ada_Node);
+      procedure Resolve_Block
+        (Block                    : Ada_Node;
+         In_Generic_Instantiation : Boolean := False);
       --  Call Resolve_Node on all xref entry points (according to
       --  Is_Xref_Entry_Point) in Block except for Block itself.
 
@@ -857,12 +954,13 @@ procedure Nameres is
             Trigger_Envs_Debug (False);
 
          when Pragma_Test_Statement | Pragma_Test_Statement_UID =>
-            Resolve_Node (Node       => P.Test_Target,
-                          Show_Slocs => P.Kind /= Pragma_Test_Statement_UID);
+            Resolve_Node (Node        => P.Target_Stmt,
+                          Show_Slocs  => P.Kind /= Pragma_Test_Statement_UID,
+                          Expect_Fail => P.Expect_Fail);
             Empty := False;
 
          when Pragma_Test_Block =>
-            Resolve_Block (P.Test_Target);
+            Resolve_Block (P.Target_Block, False);
             Empty := False;
 
          when Pragma_Find_All_References =>
@@ -880,7 +978,9 @@ procedure Nameres is
       -- Resolve_Block --
       -------------------
 
-      procedure Resolve_Block (Block : Ada_Node) is
+      procedure Resolve_Block
+        (Block                    : Ada_Node;
+         In_Generic_Instantiation : Boolean := False) is
 
          procedure Resolve_Entry_Point (Node : Ada_Node);
          --  Callback for tree traversal in Block
@@ -892,7 +992,9 @@ procedure Nameres is
          procedure Resolve_Entry_Point (Node : Ada_Node) is
          begin
             if Node /= Block then
-               Resolve_Node (Node);
+               Resolve_Node
+                 (Node,
+                  In_Generic_Instantiation => In_Generic_Instantiation);
             end if;
          end Resolve_Entry_Point;
 
@@ -906,11 +1008,11 @@ procedure Nameres is
       -- Resolve_Node --
       ------------------
 
-      procedure Resolve_Node (Node : Ada_Node; Show_Slocs : Boolean := True) is
-
-         function XFAIL return Boolean;
-         --  If there is an XFAIL pragma for the node being resolved, show the
-         --  message, and return True.
+      procedure Resolve_Node
+        (Node                     : Ada_Node;
+         Show_Slocs               : Boolean := True;
+         In_Generic_Instantiation : Boolean := False;
+         Expect_Fail              : Boolean := False) is
 
          function Print_Node (N : Ada_Node'Class) return Visit_Status;
          --  Callback for the tree traversal in Node. Print xref info for N.
@@ -943,20 +1045,29 @@ procedure Nameres is
                          else Image
                            (Decl_Name.P_Unique_Identifying_Name));
                   begin
-                     Put_Line ("  references: " & Referenced_Decl_Image);
+                     Put_Line ("  references:    " & Referenced_Decl_Image);
                   end;
                end if;
 
                declare
-                  Decl : constant Base_Type_Decl :=
+                  Type_Decl : constant Base_Type_Decl :=
                      P_Expression_Type (As_Expr (N));
+                  Expected_Type_Decl : constant Base_Type_Decl :=
+                     P_Expected_Expression_Type (As_Expr (N));
 
-                  Decl_Image : constant String :=
-                    (if Show_Slocs or else Decl.Is_Null
-                     then Image (Decl)
-                     else Image (Decl.P_Unique_Identifying_Name));
+                  Type_Decl_Image : constant String :=
+                    (if Show_Slocs or else Type_Decl.Is_Null
+                     then Image (Type_Decl)
+                     else Image (Type_Decl.P_Unique_Identifying_Name));
+
+                  Expected_Type_Decl_Image : constant String :=
+                    (if Show_Slocs or else Expected_Type_Decl.Is_Null
+                     then Image (Expected_Type_Decl)
+                     else Image
+                       (Expected_Type_Decl.P_Unique_Identifying_Name));
                begin
-                  Put_Line ("  type:       " & Decl_Image);
+                  Put_Line ("  type:          " & Type_Decl_Image);
+                  Put_Line ("  expected type: " & Expected_Type_Decl_Image);
                end;
             end if;
             return
@@ -966,33 +1077,6 @@ procedure Nameres is
                then Over
                else Into);
          end Print_Node;
-
-         -----------
-         -- XFAIL --
-         -----------
-
-         function XFAIL return Boolean is
-            N : constant Ada_Node := Next_Sibling (Node);
-         begin
-            if not Is_Null (N) and then Kind (N) = Ada_Pragma_Node then
-               if Child (N, 1).Text = "XFAIL_Nameres" then
-                  declare
-                     Arg : constant String_Literal :=
-                        N.As_Pragma_Node.F_Args.Child (1)
-                        .As_Base_Assoc.P_Assoc_Expr.As_String_Literal;
-                  begin
-                     if Arg.Is_Null then
-                        raise Program_Error
-                          with "Invalid arg for " & N.Image;
-                     end if;
-                     Put_Line ("XFAIL: " & Image (Arg.P_Denoted_Value, False));
-                     Put_Line ("");
-                  end;
-               end if;
-               return True;
-            end if;
-            return False;
-         end XFAIL;
 
          Verbose     : constant Boolean :=
             not (Quiet or else Args.Only_Show_Failures.Get);
@@ -1020,25 +1104,76 @@ procedure Nameres is
          --  Perform name resolution
 
          if P_Resolve_Names (Node) or else Args.Imprecise_Fallback.Get then
+            if Expect_Fail then
+               if not Quiet then
+                  Put_Line
+                    ("A failure was expected but name resolution succeeded:");
+                  Put_Line ("");
+               end if;
+               Increment (Stats.Nb_Fails);
+            else
+               Increment (Stats.Nb_Successes);
+            end if;
+
             if not Args.Only_Show_Failures.Get then
                Dummy := Traverse (Node, Print_Node'Access);
             end if;
-
-            Increment (Job_Data.Stats.Nb_Successes);
 
             if Output_JSON then
                Obj.Set_Field ("success", True);
             end if;
          else
-            Put_Line ("Resolution failed for node " & Node.Image);
-            if XFAIL then
-               Increment (Job_Data.Stats.Nb_Xfails);
+            if not Quiet then
+               if Expect_Fail then
+                  Put_Line ("Name resolution failed as expected with:");
+                  Put_Line ("");
+               end if;
+               Emit_Diagnostics (Node, P_Nameres_Diagnostics (Node));
+            end if;
+
+            if Expect_Fail then
+               Increment (Stats.Nb_Xfails);
             else
-               Increment (Nb_File_Fails);
+               Increment (Stats.Nb_Fails);
             end if;
 
             if Output_JSON then
                Obj.Set_Field ("success", False);
+            end if;
+         end if;
+
+         --  Traverse generics instantiations
+
+         if Args.Traverse_Generics.Get then
+            if Node.Kind in Ada_Generic_Instantiation then
+               declare
+                  Generic_Decl : constant Libadalang.Analysis.Generic_Decl :=
+                    Node.As_Generic_Instantiation.P_Designated_Generic_Decl;
+                  Generic_Body : constant Body_Node :=
+                    Generic_Decl.P_Body_Part_For_Decl;
+               begin
+                  if Verbose then
+                     Put_Title
+                       ('*', "Traversing generic node " & Generic_Decl.Image);
+                  end if;
+                  Resolve_Block (Generic_Decl.As_Ada_Node, True);
+                  if not Generic_Body.Is_Null then
+                     if Verbose then
+                        Put_Title
+                          ('*',
+                           "Traversing generic node " & Generic_Body.Image);
+                     end if;
+                     Resolve_Block (Generic_Body.As_Ada_Node, True);
+                  end if;
+               end;
+            elsif In_Generic_Instantiation and then
+               Node.Parent.Kind in Ada_Body_Stub
+               --  Body_Stub isn't an entry point, but its Subp_Spec is. So,
+               --  check if Node.Parent is a Body_Stub.
+            then
+               Resolve_Block
+                 (Node.Parent.As_Body_Stub.P_Next_Part_For_Decl.As_Ada_Node,
+                  True);
             end if;
          end if;
 
@@ -1056,12 +1191,7 @@ procedure Nameres is
               ("Resolution failed with exception for node " & Node.Image);
             Dump_Exception (E, Obj);
 
-            if XFAIL then
-               Increment (Job_Data.Stats.Nb_Xfails);
-            else
-               Increment (Job_Data.Stats.Nb_Exception_Fails);
-               Increment (Nb_File_Fails);
-            end if;
+            Increment (Stats.Nb_Fails);
       end Resolve_Node;
 
    begin
@@ -1109,13 +1239,23 @@ procedure Nameres is
          New_Line;
       end if;
 
-      --  Update statistics
+      --  Store the total number of nodes to avoid recomputing it each time
+      --  it is needed.
+      Stats.Nb_Total := Stats.Nb_Successes + Stats.Nb_Fails + Stats.Nb_Xfails;
 
-      Job_Data.Stats.Nb_Fails := Job_Data.Stats.Nb_Fails + Nb_File_Fails;
-      if Job_Data.Stats.Max_Nb_Fails < Nb_File_Fails then
-         Job_Data.Stats.File_With_Most_Fails := +Filename;
-         Job_Data.Stats.Max_Nb_Fails := Nb_File_Fails;
+      --  Compute elapsed time for processing this file
+      Stats.Processing_Time := Clock - Start;
+
+      --  Store the number of nodes resolved per second for this file, which
+      --  will be used to determine which files are slow to resolve.
+      if Stats.Processing_Time > 0.0 then
+         Stats.Resolution_Speed :=
+            Float (Stats.Nb_Total) / Float (Stats.Processing_Time);
       end if;
+
+      --  File processing was successful, include the stats for this file in
+      --  the job's results.
+      Job_Data.Stats.File_Stats.Append (Stats);
 
    end Process_File;
 
@@ -1134,7 +1274,7 @@ procedure Nameres is
       is (case Kind is
           when Any                         => True,
           when Subp_Call | Subp_Overriding => Decl.P_Is_Subprogram,
-          when Type_Derivation             => Decl.Kind = Ada_Type_Decl);
+          when Type_Derivation             => Decl.Kind in Ada_Type_Decl);
       --  Return whether Decl is a valid target for the given Kind request
 
       procedure Process_Refs
@@ -1312,77 +1452,160 @@ procedure Nameres is
    is
       pragma Unreferenced (Context);
 
-      Stats     : Stats_Record;
-      Total     : Natural;
-      Time_Stop : Time;
-      Watermark : GNATCOLL.Memory.Watermark_Info;
+      Watermark  : GNATCOLL.Memory.Watermark_Info;
+      App_Failed : Boolean := False;
    begin
       --  Measure time and memory before post-processing
-
-      if Args.Time.Get then
-         Time_Stop := Clock;
-      end if;
 
       if Args.Memory.Get then
          Watermark := GNATCOLL.Memory.Get_Allocations;
       end if;
 
-      --  Aggregate statistics from all jobs
+      if Args.Stats.Get then
+         Print_Stats (Jobs);
+      end if;
 
-      Stats := Job_Data (Jobs'First).Stats;
-      for I in Jobs'First + 1 .. Jobs'Last loop
-         Merge (Stats, Job_Data (I).Stats);
-      end loop;
-      Total := Stats.Nb_Successes + Stats.Nb_Fails + Stats.Nb_Xfails;
-
-      if Args.Stats.Get and then Total > 0 then
+      if Args.Memory.Get then
          declare
-            type Percentage is delta 0.01 range 0.0 .. 0.01 * 2.0**32;
-            Percent_Successes : constant Percentage := Percentage
-              (Float (Stats.Nb_Successes) / Float (Total) * 100.0);
-            Percent_Failures : constant Percentage :=
-              Percentage (Float (Stats.Nb_Fails) / Float (Total) * 100.0);
-
-            Percent_XFAIL : constant Percentage :=
-              Percentage (Float (Stats.Nb_Xfails) / Float (Total) * 100.0);
+            Watermark_Mb : constant Byte_Count :=
+              Watermark.Current / 1024 / 1024;
          begin
-            Put_Line ("Resolved " & Total'Image & " nodes");
-            Put_Line ("Of which" & Stats.Nb_Successes'Image
-                      & " successes - " & Percent_Successes'Image & "%");
-            Put_Line ("Of which" & Stats.Nb_Fails'Image
-                      & " failures - " & Percent_Failures'Image & "%");
-
-            Put_Line ("Of which" & Stats.Nb_Xfails'Image
-                      & " XFAILS - " & Percent_XFAIL'Image & "%");
-            Put_Line ("File with most failures ("
-                      & Stats.Max_Nb_Fails'Image
-                      & "):" & (+Stats.File_With_Most_Fails));
+            Ada.Text_IO.Put_Line
+              ("Memory allocation at end (MB):" & Watermark_Mb'Image);
          end;
       end if;
 
-      Put_Line ("Done.");
-
-      if Args.Memory.Get then
-         Ada.Text_IO.Put_Line
-           ("Memory allocation at end (MB):"
-            & Integer'Image (Integer (Watermark.Current) / 1024 / 1024));
-      end if;
+      for Job of Jobs loop
+         for File_Stats of Job_Data (Job.ID).Stats.File_Stats loop
+            App_Failed := App_Failed or File_Stats.Nb_Fails > 0;
+         end loop;
+      end loop;
 
       Free (Job_Data);
 
-      if Args.Time.Get then
-         Ada.Text_IO.Put_Line
-           ("Total time elapsed:" & Duration'Image (Time_Stop - Time_Start));
-
-         --  If the user has requested --time and --memory, warn that this
-         --  skews time measurements.
-         if Args.Memory.Get then
-            Ada.Text_IO.Put_Line
-              ("WARNING: measuring memory impacts time performance!");
-         end if;
+      if App_Failed and then not Args.No_Abort_On_Failures.Get then
+         Abort_App ("Name resolution failed.");
       end if;
+
+      Put_Line ("Done.");
    end App_Post_Process;
 
+   -----------------
+   -- Print_Stats --
+   -----------------
+
+   procedure Print_Stats (Jobs : App_Job_Context_Array) is
+      Time_Stop : constant Time := Clock;
+
+      Slowest_Files : File_Stats_Vectors.Vector;
+      --  A vector of files sorted by resolution speed. Its length is bounded
+      --  by ``Number_Of_Slowest_Files_To_Print``.
+
+      procedure Insert_In_Slowest_Files (Value : File_Stats_Record);
+      --  Insert the given file in the ``Slowest_Files`` vector at the
+      --  correct index, so that the vector remains sorted.
+
+      ----------------------------------
+      -- Insert_File_Resolution_Speed --
+      ----------------------------------
+
+      procedure Insert_In_Slowest_Files (Value : File_Stats_Record) is
+         use type Ada.Containers.Count_Type;
+
+         Insertion_Index : Natural := Slowest_Files.First_Index;
+      begin
+         --  Find out where the given file should be inserted by comparing it
+         --  to the existing files.
+         while Insertion_Index <= Slowest_Files.Last_Index loop
+            exit when Slowest_Files
+              (Insertion_Index).Resolution_Speed > Value.Resolution_Speed;
+            Insertion_Index := Insertion_Index + 1;
+         end loop;
+
+         if Insertion_Index <= Number_Of_Slowest_Files_To_Print then
+            Slowest_Files.Insert (Insertion_Index, Value);
+
+            --  Shrink the vector in case its size exceeds the max size it is
+            --  allowed to have.
+            if Slowest_Files.Length > Number_Of_Slowest_Files_To_Print then
+               Slowest_Files.Set_Length (Number_Of_Slowest_Files_To_Print);
+            end if;
+         end if;
+      end Insert_In_Slowest_Files;
+
+      Nb_Successes         : Natural := 0;
+      Nb_Fails             : Natural := 0;
+      Nb_Xfails            : Natural := 0;
+      Total                : Natural := 0;
+      Max_Nb_Fails         : Natural := 0;
+      File_With_Most_Fails : Unbounded_String;
+   begin
+      for Job of Jobs loop
+         for File_Stats of Job_Data (Job.ID).Stats.File_Stats loop
+            Nb_Successes := Nb_Successes + File_Stats.Nb_Successes;
+            Nb_Fails     := Nb_Fails + File_Stats.Nb_Fails;
+            Nb_Xfails    := Nb_Xfails + File_Stats.Nb_Xfails;
+
+            if File_Stats.Nb_Fails > Max_Nb_Fails then
+               Max_Nb_Fails := File_Stats.Nb_Fails;
+               File_With_Most_Fails := File_Stats.Filename;
+            end if;
+
+            if File_Stats.Resolution_Speed > 0.0 then
+               Insert_In_Slowest_Files (File_Stats);
+            end if;
+         end loop;
+      end loop;
+
+      Total := Nb_Successes + Nb_Fails + Nb_Xfails;
+
+      if Total > 0 then
+         declare
+            type Percentage is delta 0.01 range 0.0 .. 0.01 * 2.0**32;
+            type Fixed is delta 0.0001 range -1.0e6 .. 1.0e6;
+
+            Percent_Successes : constant Percentage := Percentage
+              (Float (Nb_Successes) / Float (Total) * 100.0);
+            Percent_Failures : constant Percentage :=
+              Percentage (Float (Nb_Fails) / Float (Total) * 100.0);
+
+            Percent_XFAIL : constant Percentage :=
+              Percentage (Float (Nb_Xfails) / Float (Total) * 100.0);
+         begin
+            Put_Line ("Resolved " & Total'Image & " nodes");
+            Put_Line ("Of which" & Nb_Successes'Image
+                      & " successes - " & Percent_Successes'Image & "%");
+            Put_Line ("Of which" & Nb_Fails'Image
+                      & " failures - " & Percent_Failures'Image & "%");
+
+            Put_Line ("Of which" & Nb_Xfails'Image
+                      & " XFAILS - " & Percent_XFAIL'Image & "%");
+            Put_Line ("File with most failures ("
+                      & Max_Nb_Fails'Image
+                      & "):" & Relative_File_Path (+File_With_Most_Fails));
+
+            Put_Line ("Slowest files to resolve:");
+            for F of Slowest_Files loop
+               Put_Line (" - " & Relative_File_Path (+F.Filename) & ":"
+                         & Integer (F.Resolution_Speed)'Image
+                         & " nodes/second (analyzed"
+                         & F.Nb_Total'Image & " nodes in"
+                         & Fixed (F.Processing_Time)'Image & " seconds)");
+            end loop;
+         end;
+      end if;
+
+      Ada.Text_IO.Put_Line
+        ("Total time elapsed:" & Duration'Image (Time_Stop - Time_Start));
+
+      --  If the user has requested --time and --memory, warn that this
+      --  skews time measurements.
+      if Args.Memory.Get then
+         Ada.Text_IO.Put_Line
+           ("WARNING: measuring memory impacts time performance!");
+      end if;
+
+   end Print_Stats;
 begin
    App.Run;
 end Nameres;

@@ -1,25 +1,7 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 --  Extension to the generated C API for Libadalang-specific entry points
 
@@ -27,21 +9,132 @@ with Ada.Unchecked_Deallocation;
 
 package Libadalang.Implementation.C.Extensions is
 
-   type Project_Scenario_Variable is record
+   type C_String_Array is array (int range <>) of chars_ptr;
+   type ada_string_array (Length : int) is record
+      C_Ptr : System.Address;
+      --  Pointer to the first string (i.e. pointer on the array), to access
+      --  elements from the C API.
+
+      Items : C_String_Array (1 .. Length);
+   end record;
+   type ada_string_array_ptr is access all ada_string_array;
+
+   procedure Free is new Ada.Unchecked_Deallocation
+     (ada_string_array, ada_string_array_ptr);
+
+   procedure ada_free_string_array (Strings : ada_string_array_ptr)
+     with Export, Convention => C;
+   --  Free the given list of source files
+
+   ----------------------
+   -- Project handling --
+   ----------------------
+
+   type ada_gpr_project is new System.Address;
+
+   type ada_gpr_project_scenario_variable is record
       Name, Value : chars_ptr;
    end record
       with Convention => C_Pass_By_Copy;
 
-   type Project_Scenario_Variable_Array is
-      array (Positive range <>) of Project_Scenario_Variable
+   type ada_gpr_project_scenario_variable_array is
+      array (Positive range <>) of ada_gpr_project_scenario_variable
       with Convention => C;
+   --  Array of name/value definitions for scenario variables. The last entry
+   --  in such arrays must be a null/null association.
+
+   procedure ada_gpr_project_load
+     (Project_File                 : chars_ptr;
+      Scenario_Vars                : System.Address;
+      Target, Runtime, Config_File : chars_ptr;
+      Ada_Only                     : int;
+      Project                      : access ada_gpr_project;
+      Errors                       : access ada_string_array_ptr)
+     with Export, Convention => C;
+   --  Load the ``Project_File`` GPR file with the given scenario variables,
+   --  target, runtime and GPR configuration file (all optional).
+   --
+   --  If ``Ada_Only`` is true, call ``Restrict_Autoconf_To_Languages`` to
+   --  make GPR only consider the Ada language.
+   --
+   --  On success, set ``Project`` to a newly allocated ``ada_gpr_project``, as
+   --  well as a possibly empty list of error messages in ``Errors``.  Raise an
+   --  ``Invalid_Project`` exception on failure.
+
+   procedure ada_gpr_project_load_implicit
+     (Target, Runtime, Config_File : chars_ptr;
+      Project                      : access ada_gpr_project;
+      Errors                       : access ada_string_array_ptr)
+     with Export, Convention => C;
+   --  Load an implicit project. On success, set ``Project`` to a newly
+   --  allocated ``ada_gpr_project``.
+
+   procedure ada_gpr_project_free (Self : ada_gpr_project)
+     with Export, Convention => C;
+   --  Free resources allocated for ``Self``
+
+   function ada_gpr_project_create_unit_provider
+     (Self    : ada_gpr_project;
+      Project : chars_ptr) return ada_unit_provider
+     with Export, Convention => C;
+   --  Create a project provider using the given GPR project ``Self``.
+   --
+   --  If ``Project`` is passed, it must be the name of a sub-project. If the
+   --  selected project contains conflicting sources, raise an
+   --  ``Inavlid_Project`` exception.
+   --
+   --  The returned unit provider assumes that resources allocated by ``Self``
+   --  are kept live: it is the responsibility of the caller to make
+   --  ``Self`` live at least as long as the returned unit provider.
+
+   function ada_gpr_project_source_files
+     (Self            : ada_gpr_project;
+      Mode            : int;
+      Projects_Data   : access chars_ptr;
+      Projects_Length : int) return ada_string_array_ptr
+     with Export, Convention => C;
+   --  Compute the list of source files in the given GPR project according to
+   --  ``Mode`` (whose value maps to positions in the
+   --  ``Libadalang.Project_Provider.Source_Files_Mode`` enum) and return it.
+   --
+   --  If the string array designated by ``Projects_Data``/``Projects_Length``
+   --  is not empty, return instead the list for the sources in all
+   --  sub-projects in ``Projects``, still applying the given mode to the
+   --  search.
+
+   function ada_gpr_project_default_charset
+     (Self : ada_gpr_project; Project : chars_ptr) return chars_ptr
+   with Export, Convention => C;
+   --  Try to detect the default charset to use for the given project.
+   --
+   --  Restrict the detection to the subproject ``Project``, or to ``Self``'s
+   --  root project if left to ``Prj.No_Project``.
+   --
+   --  Note that, as of today, this detection only looks for the ``-gnatW8``
+   --  compiler switch: other charsets are not supported.
 
    function ada_create_project_unit_provider
      (Project_File, Project : chars_ptr;
       Scenario_Vars         : System.Address;
       Target, Runtime       : chars_ptr) return ada_unit_provider
-      with Export     => True,
-           Convention => C;
+     with Export, Convention => C;
+   --  Load a project file and create a unit provider for it in one pass
+
+   procedure ada_gpr_project_initialize_context
+     (Self          : ada_gpr_project;
+      Context       : ada_analysis_context;
+      Project       : chars_ptr;
+      Event_Handler : ada_event_handler;
+      With_Trivia   : int;
+      Tab_Stop      : int)
+     with Export, Convention => C;
+   --  Wrapper around ``Initialize_Context_From_Project`` to initialize
+   --  ``Context`` (an already allocated but not yet initialized analysis
+   --  context) from ``Self``.
+
+   ------------------------
+   -- Auto unit provider --
+   ------------------------
 
    function ada_create_auto_provider
      (Input_Files : System.Address;
@@ -49,37 +142,53 @@ package Libadalang.Implementation.C.Extensions is
       with Export     => True,
            Convention => C;
 
-   type Source_File_Array is array (int range <>) of chars_ptr;
-   type Source_File_Array_Ref (Length : int) is record
-      C_Ptr : System.Address;
-      --  Pointer to the first source file (i.e. pointer on the file array), to
-      --  access elements from the C API.
+   ------------------
+   -- Preprocessor --
+   ------------------
 
-      Items : Source_File_Array (1 .. Length);
-   end record;
-   type Source_File_Array_Ref_Access is access all Source_File_Array_Ref;
+   function ada_create_preprocessor_from_file
+     (Filename    : chars_ptr;
+      Path_Data   : access chars_ptr;
+      Path_Length : int;
+      Line_Mode   : access int) return ada_file_reader
+   with Export => True, Convention => C;
+   --  Load the preprocessor data file at ``Filename`` using, directory names
+   --  in the ``Path_Data``/``Path_Length`` array  to look for definition
+   --  files. If ``Line_Mode`` is not null, use it to force the line mode in
+   --  each preprocessed source file. Return a file reader that preprocesses
+   --  sources accordingly.
 
-   procedure Free is new Ada.Unchecked_Deallocation
-     (Source_File_Array_Ref, Source_File_Array_Ref_Access);
-
-   function ada_project_source_files
-     (Project_File    : chars_ptr;
-      Scenario_Vars   : System.Address;
-      Target, Runtime : chars_ptr;
-      Mode            : int) return Source_File_Array_Ref_Access
-     with Export, Convention => C;
-   --  Load the project file according to ``Project_File``, ``Scenario_Vars``,
-   --  ``Target`` and ``Runtime``. On success, compute the list of source files
-   --  in this project according to ``Mode`` (whose value maps to positions in
-   --  the ``Libadalang.Project_Provider.Source_Files_Mode`` enum) and return
-   --  it.
+   function ada_gpr_project_create_preprocessor
+     (Self      : ada_gpr_project;
+      Project   : chars_ptr;
+      Line_Mode : access int) return ada_file_reader
+   with Export, Convention => C;
+   --  Create preprocessor data from compiler arguments found in the given GPR
+   --  project ``Self`` (``-gnatep`` and ``-gnateD`` compiler switches), or
+   --  from the ``Project`` sub-project (if the argument is passed).
    --
-   --  On project loading failure, return null and set the exception info
-   --  accordingly.
+   --  If ``Line_Mode`` is not null, use it to force the line mode in each
+   --  preprocessed source file.
+   --
+   --  Note that this function collects all arguments and returns an
+   --  approximation from them: it does not replicates exactly gprbuild's
+   --  behavior. This may raise a ``File_Read_Error`` exception if this fails
+   --  to read a preprocessor data file and a ``Syntax_Error`` exception if one
+   --  such file has invalid syntax.
+   --
+   --  The returned file reader assumes that resources allocated by ``Self``
+   --  are kept live: it is the responsibility of the caller to make ``Self``
+   --  live at least as long as the returned file reader.
 
-   procedure ada_free_source_file_array
-     (Source_Files : Source_File_Array_Ref_Access)
+   --------------------
+   -- Config pragmas --
+   --------------------
+
+   procedure ada_set_config_pragmas_mapping
+     (Context        : ada_analysis_context;
+      Global_Pragmas : ada_analysis_unit;
+      Local_Pragmas  : access ada_analysis_unit)
      with Export, Convention => C;
-   --  Free the given list of source files
+   --  See the C header
 
 end Libadalang.Implementation.C.Extensions;

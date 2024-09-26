@@ -1,0 +1,142 @@
+## vim: filetype=makocpp
+
+<%
+   project_type = capi.get_name('gpr_project')
+   scn_var_type = capi.get_name('gpr_project_scenario_variable')
+   str_array_type = capi.get_name('string_array_ptr')
+   string_array_struct = capi.get_name('string_array_ptr_struct')
+%>
+
+/* Handling of string arrays */
+
+${c_doc('libadalang.string_array')}
+typedef struct {
+   int length;
+   const char**c_ptr;
+} ${string_array_struct};
+
+typedef ${string_array_struct} *${str_array_type};
+
+${c_doc('libadalang.free_string_array')}
+extern void
+${capi.get_name('free_string_array')} (
+   ${str_array_type} source_files
+);
+
+/* Project handling */
+
+${c_doc('libadalang.gpr_project')}
+typedef void *${project_type};
+
+${c_doc('libadalang.gpr_scenario_variable')}
+typedef struct {
+   char *name;
+   char *value;
+} ${scn_var_type};
+
+${c_doc('libadalang.gpr_project_load')}
+extern void
+${capi.get_name('gpr_project_load')}(
+   const char *project_file,
+   const ${scn_var_type} *scenario_vars,
+   const char *target,
+   const char *runtime,
+   const char *config_file,
+   int ada_only,
+   ${project_type} *project,
+   ${str_array_type} *errors
+);
+
+${c_doc('libadalang.gpr_project_load_implicit')}
+extern void
+${capi.get_name('gpr_project_load_implicit')}(
+   const char *target,
+   const char *runtime,
+   const char *config_file,
+   ${project_type} *project,
+   ${str_array_type} *errors
+);
+
+${c_doc('libadalang.gpr_project_free')}
+extern void
+${capi.get_name('gpr_project_free')} (${project_type} self);
+
+${c_doc('libadalang.gpr_project_create_unit_provider')}
+extern ${unit_provider_type}
+${capi.get_name('gpr_project_create_unit_provider')} (
+    ${project_type} self,
+    const char *project
+);
+
+${c_doc('libadalang.gpr_project_source_files')}
+extern ${str_array_type}
+${capi.get_name('gpr_project_source_files')} (
+   ${project_type} self,
+   int mode,
+   const char **projects_data,
+   int projects_length
+);
+
+${c_doc('libadalang.gpr_project_default_charset')}
+extern char *
+${capi.get_name('gpr_project_default_charset')} (
+    ${project_type} self,
+    const char *project
+);
+
+${c_doc('libadalang.gpr_project_initialize_context')}
+extern void
+${capi.get_name('gpr_project_initialize_context')}(
+   ${project_type} self,
+   ${analysis_context_type} context,
+   const char *project,
+   ${event_handler_type} event_handler,
+   int with_trivia,
+   int tab_stop
+);
+
+${c_doc('libadalang.create_project_unit_provider')}
+extern ${unit_provider_type}
+${capi.get_name('create_project_unit_provider')}(
+   const char *project_file,
+   const char *project,
+   const ${scn_var_type} *scenario_vars,
+   const char *target,
+   const char *runtime
+);
+
+/* Auto unit provider */
+
+${c_doc('libadalang.create_auto_provider')}
+extern ${unit_provider_type}
+${capi.get_name('create_auto_provider')}(
+   const char **input_files,
+   const char *charset
+);
+
+/* Preprocessor */
+
+${c_doc('libadalang.create_preprocessor_from_file')}
+extern ${file_reader_type}
+${capi.get_name('create_preprocessor_from_file')}(
+   const char *filename,
+   const char **path_data,
+   int path_length,
+   const int *line_mode
+);
+
+${c_doc('libadalang.gpr_project_create_preprocessor')}
+extern ${file_reader_type}
+${capi.get_name('gpr_project_create_preprocessor')}(
+   ${project_type} self,
+   const char *project,
+   const int *line_mode
+);
+
+${c_doc('libadalang.set_config_pragmas_mapping')}
+extern void
+${capi.get_name('set_config_pragmas_mapping')}(
+   ${analysis_context_type} context,
+   ${analysis_unit_type} global_pragmas,
+   ${analysis_unit_type} *local_pragmas
+);

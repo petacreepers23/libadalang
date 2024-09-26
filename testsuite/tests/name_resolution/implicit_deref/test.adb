@@ -9,4 +9,6 @@ begin
    pragma Test_Statement;
    X := I;
    pragma Test_Statement;
+   X := X;
+   pragma Test_Statement;
 end Main;

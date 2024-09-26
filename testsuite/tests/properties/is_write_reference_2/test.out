@@ -1,0 +1,14 @@
+Working on node <CallStmt test.adb:9:7-9:25>
+============================================
+
+Set 'foo_arg' to 'node.f_call.f_suffix[0].f_r_expr'
+Result: <CallExpr test.adb:9:12-9:23>
+
+Eval 'foo_arg.p_is_write_reference()'
+Result: True
+
+Set 'x_arg' to 'foo_arg.f_suffix[0].f_r_expr'
+Result: <Id "X" test.adb:9:21-9:22>
+
+Eval 'x_arg.p_is_write_reference()'
+Result: True

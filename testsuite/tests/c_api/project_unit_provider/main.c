@@ -6,6 +6,7 @@
 #include "langkit_dump.h"
 #include "langkit_find.h"
 #include "langkit_text.h"
+#include "utils.h"
 
 int
 main(void)
@@ -16,14 +17,16 @@ main(void)
     uint32_t unit_name_chars[2] = { 'p', '2' };
     ada_text unit_name = { unit_name_chars, 2, true };
 
-    ada_base_entity root, subtype_ind, name;
-    ada_ada_node_array entities;
+    ada_node root, subtype_ind, name;
+    ada_node_array entities;
     ada_text text;
     int i;
 
-    ctx = ada_create_analysis_context(NULL, NULL, NULL, NULL, 1, 8);
-    if (ctx == NULL)
-        error("Could not create the analysis context");
+    ctx = ada_allocate_analysis_context ();
+    abort_on_exception ();
+
+    ada_initialize_analysis_context (ctx, NULL, NULL, NULL, NULL, 1, 8);
+    abort_on_exception ();
 
     unit = ada_get_analysis_unit_from_provider(
         ctx, &unit_name, ADA_ANALYSIS_UNIT_KIND_UNIT_SPECIFICATION, NULL, 0
@@ -47,7 +50,7 @@ main(void)
     printf(" resolves to:\n");
 
     for (i = 0; i < entities->n; ++i) {
-        ada_base_entity *ent = &entities->items[i];
+        ada_node *ent = &entities->items[i];
 
         printf("  ");
         ada_node_image(ent, &text);
@@ -57,7 +60,7 @@ main(void)
     }
     if (entities->n == 0)
       printf("  <nothing>\n");
-    ada_ada_node_array_dec_ref(entities);
+    ada_node_array_dec_ref(entities);
 
     ada_context_decref(ctx);
     puts("Done.");

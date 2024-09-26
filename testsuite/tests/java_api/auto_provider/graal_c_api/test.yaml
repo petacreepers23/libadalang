@@ -1,0 +1,5 @@
+driver: java
+mode: graal_c_api
+java_path: ../
+main_class: AutoProvider
+projects_path: ../sources

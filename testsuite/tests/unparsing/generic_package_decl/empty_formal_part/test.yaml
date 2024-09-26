@@ -1,0 +1,5 @@
+driver: unparser
+rule: generic_decl
+description: |
+  Test that there is no line break between the keywords `generic` and
+  `function`.

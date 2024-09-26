@@ -1,11 +1,28 @@
-Advices & gotchas
-=================
+Advice & gotchas
+================
 
 This section of the manual regroups together guidance that we consider vital to
 develop with Libadalang, but unlike the tutorial, this is meant as a grab bag
 that will be useful to new developers as well as experienced Libadalang
 developers. We advise people using Libadalang to come back to this section from
 time to time to see if there are new advices & gotchas.
+
+Ada parsing: Identifiers starting with a ``$``
+----------------------------------------------
+
+Historically, Libadalang has parsed identifiers starting with a dollar (``$``)
+as regular identifiers, even though it is not valid Ada. The aim for that was
+to provide minimal support for GNATprep style preprocessing.
+
+However, nowadays, full support for preprocessing has been implemented in
+Libadalang, via the :ada:ref:`Langkit_Support.File_Readers` and
+:ada:ref:`Libadalang.Preprocessing` APIs. If you use those,
+identifiers starting with ``$`` will be interpreted as preprocessor
+identifiers. Else, they will just be parsed normally.
+
+Despite Libadalang having a real preprocessor, this behavior has been kept for
+backward compatibility with some LAL projects, notably `Ada-Renaissance
+<https://github.com/TNO/Renaissance-Ada>`_, and will be preserved onwards.
 
 Ada API: Up & down casting ``Ada_Node`` instances
 -------------------------------------------------
@@ -32,10 +49,38 @@ conversion functions to up/down cast node types:
     --  This code is valid and will work as you expect
     C : Compilation_Unit := A.As_Compilation_Unit;
 
+Ada API: Equality between ``Ada_Node`` and derived types
+--------------------------------------------------------
+
+Summary
+^^^^^^^
+
+As said previously, nodes types are like fat pointers to a node, something like
+``(pointer_to_node, more_entity_info)``.
+
+For complex reasons we're exposing an ``"="`` operator on classwide nodes, and
+that's the one you'll use by default, but when instantiating generic containers
+with nodes, if you need an equivalent function, you cannot use ``"="``, because
+that will use the default equality operator. Instead, you need to use the
+``Ada_Node.Equals`` function:
+
+.. code-block:: ada
+
+   with Libadalang.Analysis; use Libadalang.Analysis;
+
+   ...
+
+   package Node_Sets is new Ada.Containers.Hashed_Sets
+     (Element_Type        => Ada_Node,
+      Hash                => Hash,
+      Equivalent_Elements => Equals,
+      "="                 => Equals);
+
+
 .. _standard-unit:
 
-Standard unit pecularities
---------------------------
+Standard unit peculiarities
+---------------------------
 
 In Ada, the ``Standard`` package is special: is acting such as a built-in
 compilation unit and is the root of all other units: these are technically
@@ -196,4 +241,28 @@ types are represented with partial definitions:
 
 Defining all values for each is not realistic, as for instance
 ``Wide_Wide_Character`` has 4 billion values: it is not reasonable to allocate
-memory for all of them.
+memory for all of them. Nevertheless, undefined characters are properly
+supported and synthesized on-demand, which means that any
+characters from any sets can be properly handled by Libadalang.
+
+.. _The origin parameter:
+
+The ``origin`` parameter
+------------------------
+
+In Libadalang many semantic properties, like
+:ada:ref:`Libadalang.Analysis.P_Referenced_Decl`, have an ``origin`` parameter.
+That's because for many semantic queries, the answer to your query might differ
+depending on where you come from.
+
+For example in the following code:
+
+.. code-block:: ada
+
+   package P is
+      type T is private;
+   private
+      type T is record
+         A, B: Integer;
+      end record;
+   end P;

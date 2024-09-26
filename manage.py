@@ -3,6 +3,7 @@
 import os.path
 import subprocess
 import sys
+from langkit.utils import LibraryType
 
 
 # For developer convenience, add the "langkit" directory next to this script to
@@ -23,10 +24,7 @@ from langkit.utils import Colors, printcol
 class Manage(ManageScript):
 
     ENABLE_BUILD_WARNINGS_DEFAULT = True
-
-    PERF_PARSE = 'parse'
-    PERF_PARSE_AND_TRAVERSE = 'parse-and-traverse'
-    PERF_CHOICES = (PERF_PARSE, PERF_PARSE_AND_TRAVERSE)
+    ENABLE_JAVA_DEFAULT = True
 
     def add_extra_subcommands(self) -> None:
         ########
@@ -41,55 +39,51 @@ class Manage(ManageScript):
             help='Disable tests involving the OCaml API'
         )
         self.test_parser.add_argument(
+            '--disable-java', action="store_true",
+             help='Disable tests involving the Java API'
+        )
+        self.test_parser.add_argument(
             'testsuite-args', nargs='*',
             help='Arguments to pass to testsuite.py.'
         )
         self.add_build_mode_arg(self.test_parser)
 
-        #############
-        # Perf Test #
-        #############
+        #########
+        # ACATS #
+        #########
 
-        self.perf_test_parser = self.add_subcommand(self.do_perf_test)
-        self.perf_test_parser.add_argument(
-            '--work-dir', default='performance_testsuite',
-            help='Directory into which the performance testsuite will be'
-                 ' executed'
+        self.acats_parser = self.add_subcommand(
+            self.do_acats, accept_unknown_args=False
         )
-        self.perf_test_parser.add_argument(
-            '--nb-runs', type=int, default=4,
-            help='Number of runs (default: 4)'
+        self.acats_parser.add_argument(
+            '--acats-dir', default='acats',
+            help='The path to the acats repository. By default, use "acats" in'
+                 ' the current directory.'
         )
-        self.perf_test_parser.add_argument(
-            '--no-recompile', action='store_true',
-            help='Do not recompile the library before running the perf'
-                 ' testsuite'
+        self.acats_parser.add_argument(
+            'acats-args', nargs='*',
+            help='Arguments to pass to run_acats_test.py.'
         )
-        self.perf_test_parser.add_argument(
-            '--scenario', '-s',
-            choices=self.PERF_CHOICES, default=self.PERF_PARSE,
-            help='Profiling scenario to use. Basically: "what to measure?".'
-        )
-        self.perf_test_parser.add_argument(
-            '--with-trivia', action='store_true',
-            help='Include trivia in parsing'
-        )
-        self.add_generate_args(self.perf_test_parser)
-        self.add_build_args(self.perf_test_parser)
+        self.add_build_mode_arg(self.acats_parser)
 
     def create_context(self, args):
         # Keep these import statements here so that they are executed only
         # after the coverage computation actually started.
-        from langkit.compile_context import ADA_BODY, CompileCtx, LibraryEntity
-        from ada.lexer import ada_lexer
-        from ada.grammar import ada_grammar
+        from langkit.compile_context import (
+            AdaSourceKind, CacheCollectionConf, CompileCtx, LibraryEntity
+        )
         from ada.documentation import libadalang_docs
+
+        # Give Liblktlang access to our Lkt files
+        os.environ["LKT_PATH"] = os.path.join(os.path.dirname(__file__), "ada")
 
         ctx = CompileCtx(
             lang_name='Ada',
-            short_name='LAL',
-            lexer=ada_lexer,
-            grammar=ada_grammar,
+            short_name='lal',
+            lexer=None,
+            grammar=None,
+            types_from_lkt=True,
+            lkt_file=os.path.join(os.path.dirname(__file__), "ada", "nodes.lkt"),
             default_charset='iso-8859-1',
             verbosity=args.verbosity,
             default_unit_provider=LibraryEntity(
@@ -98,22 +92,56 @@ class Manage(ManageScript):
             symbol_canonicalizer=LibraryEntity('Libadalang.Sources',
                                                'Canonicalize'),
             documentations=libadalang_docs,
+            property_exceptions={"Precondition_Failure"},
+
+            generate_unparser=True,
+            default_unparsing_config="default_unparsing_config.json",
+
+            # Setup a configuration of the cache collection mechanism that
+            # works well for Ada.
+            cache_collection_conf=CacheCollectionConf(
+                threshold_increment=100000,
+                decision_heuristic=LibraryEntity(
+                    "Libadalang.Implementation.Extensions",
+                    "Should_Collect_Env_Caches"
+                )
+            )
         )
 
-        # Internals need to access environment hooks and the symbolizer
+        # Internals need to access environment hooks, the symbolizer and
+        # internal configuration pragmas file tables.
         ctx.add_with_clause('Implementation',
-                            ADA_BODY, 'Libadalang.Env_Hooks',
+                            AdaSourceKind.body, 'Libadalang.Env_Hooks',
                             use_clause=True)
         ctx.add_with_clause('Implementation',
-                            ADA_BODY, 'Libadalang.Sources',
+                            AdaSourceKind.body, 'Libadalang.Sources',
                             use_clause=False)
+        ctx.add_with_clause('Implementation',
+                            AdaSourceKind.spec,
+                            'Libadalang.Config_Pragmas_Impl',
+                            use_clause=True)
 
         # Bind Libadalang's custom iterators to the public API
         ctx.add_with_clause('Iterators',
-                            ADA_BODY, 'Libadalang.Iterators.Extensions')
+                            AdaSourceKind.body,
+                            'Libadalang.Iterators.Extensions')
 
         # LAL.Analysis.Is_Keyword is implemented using LAL.Lexer's
-        ctx.add_with_clause('Analysis', ADA_BODY, 'Libadalang.Lexer')
+        ctx.add_with_clause('Analysis', AdaSourceKind.body, 'Libadalang.Lexer')
+
+        # LAL.Analysis.Create_Context_From_Project just calls the homonym
+        # function in LAL.Project_Provider.
+        for dep in [
+            "GNATCOLL.Projects", "GPR2.Project.Tree", "GPR2.Project.View"
+        ]:
+            ctx.add_with_clause("Analysis", AdaSourceKind.spec, dep)
+        for dep in ["Libadalang.GPR_Impl", "Libadalang.Project_Provider"]:
+            ctx.add_with_clause("Analysis", AdaSourceKind.body, dep)
+
+        # LAL.Lexer.Is_Keyword's implementation uses precomputed symbols
+        ctx.add_with_clause('Lexer',
+                            AdaSourceKind.body,
+                            'Libadalang.Implementation')
 
         ctx.post_process_ada = ada.copyright.format_ada
         ctx.post_process_cpp = ada.copyright.format_c
@@ -122,12 +150,12 @@ class Manage(ManageScript):
 
         # Register our custom exception types
         ctx.register_exception_type(
-            package=[names.Name("GNATCOLL"), names.Name("Projects")],
-            name=names.Name("Invalid_Project"),
+            package=["GPR2"],
+            name=names.Name("Project_Error"),
             doc_section="libadalang.project_provider",
         )
         ctx.register_exception_type(
-            package=[names.Name("Libadalang"), names.Name("Project_Provider")],
+            package=["Libadalang", "Project_Provider"],
             name=names.Name("Unsupported_View_Error"),
             doc_section="libadalang.project_provider",
         )
@@ -143,13 +171,12 @@ class Manage(ManageScript):
 
     @property
     def main_programs(self):
-        return super(Manage, self).main_programs | {'nameres', 'navigate',
-                                                    'gnat_compare'}
+        return super(Manage, self).main_programs | {
+            'nameres', 'navigate', 'gnat_compare', 'lal_dda', 'lal_prep',
+        }
 
     def do_generate(self, args):
-        # Always generate the unparsing machinery and report unused
-        # documentation entries.
-        args.generate_unparser = True
+        # Report unused documentation entries
         args.report_unused_doc_entries = True
         super(Manage, self).do_generate(args)
     do_generate.__doc__ = ManageScript.do_generate.__doc__
@@ -199,7 +226,7 @@ class Manage(ManageScript):
         argv = [
             sys.executable,
             self.dirs.lang_source_dir('testsuite', 'testsuite.py'),
-            '-Edtmp', '--build-mode={}'.format(args.build_mode),
+            '-Edtmp', '--build-mode={}'.format(args.build_modes[0].name),
 
             # Arguments to pass to GNATcoverage, just in case coverage is
             # requested.
@@ -210,16 +237,47 @@ class Manage(ManageScript):
         if not args.disable_ocaml:
             argv.append('--with-ocaml-bindings')
             argv.append(os.path.join(args.build_dir, 'ocaml'))
-        if not args.library_types.relocatable:
+
+        if not args.disable_java:
+            argv.append('--with-java-bindings')
+            argv.append(os.path.join(args.build_dir, 'java'))
+
+        if not LibraryType.relocatable in args.library_types:
             argv.append('--disable-shared')
+
         argv.extend(unknown_args)
         argv.extend(getattr(args, 'testsuite-args'))
 
         try:
-            return self.check_call('Testsuite', argv)
+            return self.check_call('Testsuite', argv, direct_c_header=True)
         except KeyboardInterrupt:
             # At this point, the testsuite already made it explicit we stopped
             # after a keyboard interrupt, so we just have to exit.
+            sys.exit(1)
+
+    def do_acats(self, args):
+        """
+        Run the ACATS testsuite.
+
+        This is a wrapper around run_acats_test.py of the libadalang part of
+        the ACATS testsuite.
+        """
+        self.set_context(args)
+
+        path = args.acats_dir
+
+        argv = [
+            sys.executable,
+            self.dirs.lang_source_dir(path, 'run_acats_test.py'),
+            '--acats-dir', path,
+            '--mode=libadalang'
+        ]
+
+        argv.extend(getattr(args, 'acats-args'))
+
+        try:
+            return self.check_call('ACATS', argv)
+        except KeyboardInterrupt:
             sys.exit(1)
 
     @staticmethod
@@ -254,124 +312,6 @@ class Manage(ManageScript):
                 if ext in ('.ads', '.adb'):
                     ada_files.add(os.path.join(root, filename))
         return ada_files
-
-    def do_perf_test(self, args):
-        """
-        Run the performance regression testsuite.
-        """
-        from time import time
-
-        self.set_context(args)
-
-        def file_lines(filename):
-            with open(filename) as f:
-                return len(list(f))
-
-        check_source_language(
-            not os.path.isabs(args.build_dir),
-            "--build-dir should be a relative path for perf testsuite"
-        )
-
-        work_dir = os.path.abspath(args.work_dir)
-        variant_name = args.build_dir
-        report_file = os.path.join(work_dir,
-                                   'report-{}.txt'.format(variant_name))
-        args.build_dir = os.path.join(work_dir, args.build_dir)
-
-        if not args.no_recompile:
-            # The perf testsuite only needs the "parse" main program
-            args.disable_mains = self.main_programs - {'parse'}
-
-            # Build libadalang in production mode inside of the perf testsuite
-            # directory.
-            self.dirs.set_build_dir(args.build_dir)
-            args.build_mode = 'prod'
-            self._mkdir(args.build_dir)
-            self.do_make(args)
-
-        # Checkout the code bases that we will use for the perf testsuite
-        source_dir = os.path.join(work_dir, "source")
-        try:
-            os.mkdir(source_dir)
-        except OSError:
-            pass
-        os.chdir(source_dir)
-        if not os.path.exists('gnat'):
-            subprocess.check_call([
-                'svn', 'co',
-                'svn+ssh://svn.us.adacore.com/Dev/trunk/gnat',
-                '-r', '314163',
-                '--ignore-externals'
-            ])
-        if not os.path.exists('gps'):
-            subprocess.check_call(['git', 'clone',
-                                   'ssh://review.eu.adacore.com:29418/gps'])
-        os.chdir('gps')
-        subprocess.check_call(['git', 'checkout',
-                               '00b73897a867514732d48ae1429faf97fb07ad7c'])
-        os.chdir('..')
-
-        # Make a list of every ada file
-
-        # Exclude some files that are contained here but that we do not parse
-        # correctly.
-        excluded_patterns = ['@', 'a-numeri', 'rad-project']
-        ada_files = filter(
-            lambda f: all(map(lambda p: p not in f, excluded_patterns)),
-            self._find_ada_sources(source_dir)
-        )
-        file_list_name = 'ada_file_list'
-        with open(file_list_name, 'w') as file_list:
-            for f in ada_files:
-                file_list.write(f + '\n')
-
-        # Get a count of the total number of ada source lines
-        lines_count = sum(map(file_lines, ada_files))
-
-        with open(report_file, 'w') as f:
-            def write_report(text, color=None):
-                if color:
-                    printcol(text, color)
-                else:
-                    print(text)
-                print(text, file=f)
-
-            write_report('=================================', Colors.HEADER)
-            write_report('= Performance testsuite results =', Colors.HEADER)
-            write_report('=================================', Colors.HEADER)
-            write_report('')
-            write_report('Name: {}'.format(variant_name))
-            write_report('Scenario: {}'.format(args.scenario))
-            write_report('')
-            elapsed_list = []
-            parse_args = ['{}/bin/parse'.format(args.build_dir), '-s', '-F',
-                          file_list_name]
-            if args.scenario == self.PERF_PARSE_AND_TRAVERSE:
-                parse_args.append('-C')
-            if args.with_trivia:
-                parse_args.append('-P')
-            for _ in range(args.nb_runs):
-                # Execute parse on the file list and get the elapsed time
-                t = time()
-                subprocess.check_call(parse_args)
-                elapsed = time() - t
-                elapsed_list.append(elapsed)
-
-                # Print a very basic report
-                write_report(
-                    'Parsed {0} lines of Ada code in {1:.2f} seconds'.format(
-                        lines_count, elapsed
-                    )
-                )
-
-            write_report('')
-            write_report('= Performance summary =', Colors.OKGREEN)
-            write_report(
-                'Mean time to parse {0} lines of code:'
-                ' {1:.2f} seconds'.format(
-                    lines_count, sum(elapsed_list) / float(len(elapsed_list))
-                )
-            )
 
 
 if __name__ == '__main__':

@@ -28,3 +28,9 @@ input_sources:
 
     - pkg5.ads
     - pkg6.ads
+
+    - pkg7.ads
+    - pkg7-child.ads
+
+    - pkg8.ads
+    - pkg8.adb

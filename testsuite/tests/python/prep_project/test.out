@@ -1,0 +1,48 @@
+== Normal ==
+
+Preprocessor output on foo.adb:
+   1 | with Bar;
+   2 |
+   3 | procedure Foo is
+   4 |    I : constant Integer := 1;
+   5 |    S : constant String :=
+   6 |
+   7 |    "FOOBAR is defined"
+   8 |
+   9 |
+  10 |
+  11 | end Foo;
+  12 |
+
+== Normal (subproject) ==
+
+Preprocessor output on foo.adb:
+   1 | with Bar;
+   2 |
+   3 | procedure Foo is
+   4 |    I : constant Integer := 1;
+   5 |    S : constant String :=
+   6 |
+   7 |
+   8 |
+   9 |    "FOOBAR is *not* defined"
+  10 |
+  11 | end Foo;
+  12 |
+
+== Normal (no_such_project) ==
+
+Error while creating the preprocessor:
+  ProjectError: no such project: no_such_project
+
+== No such file ==
+
+Error while creating the preprocessor:
+  FileReadError: no such file: foo.prep
+
+== Syntax error ==
+
+Error while creating the preprocessor:
+  SyntaxError: foo.prep:1:2: invalid token
+
+Done

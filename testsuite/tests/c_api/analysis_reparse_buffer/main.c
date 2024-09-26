@@ -28,8 +28,8 @@ const char *src_buffer_2 = (
 
 void check(ada_analysis_unit unit)
 {
-    ada_base_entity root, prelude_list, with_clause;
-    ada_base_entity has_limited;
+    ada_node root, prelude_list, with_clause;
+    ada_node has_limited;
 
     if (unit == NULL)
         error("Could not create the analysis unit for foo.adb from a buffer");
@@ -54,9 +54,11 @@ main(void)
     const size_t src_buffer_1_length = strlen(src_buffer_1);
     const size_t src_buffer_2_length = strlen(src_buffer_2);
 
-    ctx = ada_create_analysis_context(NULL, NULL, NULL, NULL, 1, 8);
-    if (ctx == NULL)
-        error("Could not create the analysis context");
+    ctx = ada_allocate_analysis_context ();
+    abort_on_exception ();
+
+    ada_initialize_analysis_context (ctx, NULL, NULL, NULL, NULL, 1, 8);
+    abort_on_exception ();
 
     /* Make sure the first parsing (with the "limited" keyword) works properly
        and check is_limited.  */

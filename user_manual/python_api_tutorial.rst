@@ -1,10 +1,10 @@
-Python API Tutorial
+Python API tutorial
 ###################
 
 Now that you are familiar with Libadalang's :ref:`core-concepts`, let's
 actually do some practice with the Python API.
 
-.. note:: Libadalang's Python API supports Python 2.7+ and Python 3.7+.
+.. note:: Libadalang's Python API supports Python 3.9 and 3.10.
 
 Preliminary setup
 =================
@@ -88,6 +88,43 @@ line/column numbers.
 
    print("Line {}: {}".format(node.sloc_range.start.line, repr(node.text)))
 
+Accessing node fields
+---------------------
+
+Another thing to do with nodes is to access their fields. Each kind of node has
+a specific set of fields: child nodes in the parsing tree. For instance,
+``ObjectDecl`` nodes have 8 syntactic fields:
+
+* ``f_ids``: identifiers for the declared objects;
+* ``f_has_aliased``: node to materialize the presence/absence for the
+  ``aliased`` keyword;
+* ``f_has_constant``: node to materialize the presence/absence for the
+  ``constant`` keyword;
+* ``f_mode``: node to materialize the parameter passing mode (when the object
+  declaration is used as a generic formal);
+* ``f_type_expr``: type for the declared objects;
+* ``f_default_expr``: expression to initialize the declared objects or provide
+  a default value;
+* ``f_renaming_clause``: part that follows the ``renames`` keyword when the
+  declaration is a renaming.
+* ``f_aspects``: list of aspects associated to this declaration.
+
+Accessing them is as simple as using the homonym attribute on the node that
+contains the field. For instance, in order to get the type expression for an
+object declaration:
+
+.. code-block:: python
+
+   obj = get_some_object_decl()
+   print(obj.f_type_expr)
+
+Note that is is always valid to access syntax fields for non-null objects. Some
+fields may contain a null node, for instance the ``ObjectDecl.f_default_expr``
+field is null for the ``V : T;`` object declaration.
+
+Final program
+-------------
+
 Put all these bit in the right order, and you should get something similar to
 the following program:
 
@@ -119,6 +156,76 @@ program>`, you should get:
    Line 38: u'Filename : constant String := Ada.Command_Line.Argument (I);'
    Line 39: u'Unit     : constant LAL.Analysis_Unit :=\n            Context.Get_From_File (Filename);'
 
+Note on API discoverability
+---------------------------
+
+The Ada syntax is rich; as a consequence, there are many node kinds, and each
+have many syntax fields. Short of reading the language grammar, the best way to
+discover the nodes that parsing creates is to let Libadalang parse an example
+and print the resulting tree. This is easily done with the ``dump`` method:
+
+.. code-block:: python
+
+   # Test script
+
+   import libadalang as lal
+   import sys
+
+   ctx = lal.AnalysisContext()
+   u = ctx.get_from_file(sys.argv[1])
+   for d in u.diagnostics:
+       print(u.format_gnu_diagnostic(d))
+   u.root.dump()
+
+.. code-block:: ada
+
+   --  Source to parse
+
+   package Pkg is
+   end Pkg;
+
+Running the above program on the ``pkg.ads`` source file yields:
+
+.. code-block:: text
+
+   CompilationUnit pkg.ads:1:1-2:9
+   |f_prelude:
+   |  AdaNodeList pkg.ads:1:1-1:1
+   |f_body:
+   |  LibraryItem pkg.ads:1:1-2:9
+   |  |f_has_private:
+   |  |  PrivateAbsent pkg.ads:1:1-1:1
+   |  |f_item:
+   |  |  PackageDecl ["Pkg"] pkg.ads:1:1-2:9
+   |  |  |f_package_name:
+   |  |  |  DefiningName "Pkg" pkg.ads:1:9-1:12
+   |  |  |  |f_name:
+   |  |  |  |  Id "Pkg" pkg.ads:1:9-1:12: Pkg
+   |  |  |f_aspects: None
+   |  |  |f_public_part:
+   |  |  |  PublicPart pkg.ads:1:15-2:1
+   |  |  |  |f_decls:
+   |  |  |  |  AdaNodeList pkg.ads:1:15-1:15
+   |  |  |f_private_part: None
+   |  |  |f_end_name:
+   |  |  |  EndName pkg.ads:2:5-2:8
+   |  |  |  |f_name:
+   |  |  |  |  Id "Pkg" pkg.ads:2:5-2:8: Pkg
+   |f_pragmas:
+   |  PragmaNodeList pkg.ads:2:9-2:9
+
+We can see here that the parse tree for ``pkg.ads`` is made of:
+
+* a ``CompilationUnit`` node as the root of the tree; that node has children in
+  3 syntax fields:
+* its ``f_prelude`` field is an ``AdaNodeList`` node, that is an empty list
+  (i.e. it has no children itself);
+* its ``f_body`` field is a ``LibraryItem`` node, which has itself other syntax
+  fields (``f_has_private`` and ``f_item``);
+* its ``f_pragmas`` field is a ``PragmaNodeList`` that is an empty list;
+* the ``PackageDecl`` node has a null ``f_aspects`` syntax field.
+
+
 Follow references
 =================
 
@@ -126,6 +233,8 @@ While the previous section only showed Libadalang's syntactic capabilities, we
 can go further with semantic analysis. The most used feature in this domain is
 the computation of cross references ("xrefs"): the ability to reach the
 definition a particular identifier references.
+
+.. _python-api-tutorial-unit-provider:
 
 Resolving files
 ---------------
@@ -149,7 +258,8 @@ currently in Python:
   your source files.
 
 * You can use features from the project provider, provided by
-  :meth:`libadalang.UnitProvider.for_project` to use a GNAT project file.
+  :meth:`libadalang.GPRProject.create_unit_provider` to use a GNAT project
+  file.
 
 Be aware though, that because of lack of access to proper Python API to process
 GNAT project files, the corresponding facilities in Python are limited for the
@@ -164,8 +274,7 @@ capabilities: when we find an object declaration, we'll print the entity
 representing the type of the object declaration.
 
 .. code-block:: python
-    :linenos:
-    :emphasize-lines: 26
+    :emphasize-lines: 27
 
     import libadalang as lal
     import argparse
@@ -177,7 +286,8 @@ representing the type of the object declaration.
 
     provider = None
     if args.project:
-        provider = lal.UnitProvider.for_project(args.project)
+        project = lal.GPRProject(args.project)
+        provider = project.create_unit_provider()
 
     context = lal.AnalysisContext(unit_provider=provider)
 
@@ -255,7 +365,7 @@ analysis units in which to look for the references. For instance, in order to
 look for all the references to the ``v`` object declaration in units
 ``foo.adb``, ``bar.adb`` and ``foobar.adb``, one may write:
 
-.. code-block:: ada
+.. code-block:: python
 
    import libadalang as lal
 
@@ -289,7 +399,7 @@ List of sources in a project
 
 Even though there is no dedicated Python API to analyze GNAT project files,
 Libadalang provides a convenience function to compute such a list:
-``libadalang.SourceFiles.for_project``. This is especially useful to compute
+``libadalang.GPRProject.source_files``. This is especially useful to compute
 the analysis units to pass to the ``p_find_all_*`` properties (described in the
 previous section).
 
@@ -298,14 +408,18 @@ the project file, scenario variables, etc.), a mode to determine the scope of
 the sources to consider (root project only, the whole project tree, the
 runtime, ...) and just returns the list of source files:
 
-.. code-block:: ada
+.. code-block:: python
 
    import libadalang as lal
 
-   context: lal.AnalysisContext = ...
+   project = lal.GPRProject(...)
+   context: lal.AnalysisContext = lal.AnalysisContext(
+       unit_provider=project.create_unit_provider(...),
+       ...
+   )
    id: lal.DefiningName = ...
 
-   source_files = lal.SourceFiles.for_project("foo.gpr")
+   source_files = project.source_files()
    units = [context.get_from_file(f) for f in source_files]
 
    print(f"Looking for references to {id}:")

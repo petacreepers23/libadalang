@@ -1,0 +1,55 @@
+# Common items to create CIs for Libadalang-related projects
+
+.basic:
+  interruptible: true
+
+
+.check_issue:
+  rules: # Launch only on merge requests
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+  services:
+    - image:e3
+    - cpu:1
+  interruptible: true
+  needs: [] # Execute regardless of the other stages
+  variables:
+    GIT_STRATEGY: none # do not checkout the current repo, not needed
+  script:
+    - require_issue
+
+
+.cb:
+  # Items to create continuous builders (CB).
+  #
+  # Such jobs are meant to be run after all updates on the "master" branch and
+  # optionally when manually triggered from the web interface.
+  #
+  # Their purpose is to check that recent work the Libadalang/Langkit/AdaSAT
+  # repositories does not break the build of GNAT. In this context, we are only
+  # interested in builds: we think that a situation where LAL changes do not
+  # break builds but create serious regressions at runtime are very unlikely,
+  # and running relevant testing is very costly.
+  extends: .basic
+  rules:
+    - if: '$CI_COMMIT_BRANCH != "master"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web"'
+  services:
+     - image:pe-base
+     - cpu:16
+     - mem:16
+  script:
+    - generic_anod_ci
+        --continuous-builder-mode
+        --add-dep eng/gpr/gpr
+        --add-dep eng/ide/gnatformat
+        --add-dep eng/ide/libadalang-tools
+        --add-dep eng/libadalang/adasat
+        --add-dep eng/libadalang/langkit
+        --add-dep eng/libadalang/libadalang
+        --add-dep eng/toolchain/templates-parser
+    - . /tmp/ci_env.sh
+    - anod run
+        --plan /tmp/checkouts/libadalang/utils/gitlab-cb.plan
+        --smart-rebuild
+        run_cb

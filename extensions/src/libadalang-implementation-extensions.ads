@@ -1,25 +1,7 @@
-------------------------------------------------------------------------------
---                                                                          --
---                                Libadalang                                --
---                                                                          --
---                     Copyright (C) 2014-2021, AdaCore                     --
---                                                                          --
--- Libadalang is free software;  you can redistribute it and/or modify  it  --
--- under terms of the GNU General Public License  as published by the Free  --
--- Software Foundation;  either version 3,  or (at your option)  any later  --
--- version.   This  software  is distributed in the hope that it  will  be  --
--- useful but  WITHOUT ANY WARRANTY;  without even the implied warranty of  --
--- MERCHANTABILITY  or  FITNESS  FOR  A PARTICULAR PURPOSE.                 --
---                                                                          --
--- As a special  exception  under  Section 7  of  GPL  version 3,  you are  --
--- granted additional  permissions described in the  GCC  Runtime  Library  --
--- Exception, version 3.1, as published by the Free Software Foundation.    --
---                                                                          --
--- You should have received a copy of the GNU General Public License and a  --
--- copy of the GCC Runtime Library Exception along with this program;  see  --
--- the files COPYING3 and COPYING.RUNTIME respectively.  If not, see        --
--- <http://www.gnu.org/licenses/>.                                          --
-------------------------------------------------------------------------------
+--
+--  Copyright (C) 2014-2022, AdaCore
+--  SPDX-License-Identifier: Apache-2.0
+--
 
 --  Extension to store the code for external properties
 
@@ -28,6 +10,9 @@ package Libadalang.Implementation.Extensions is
    --------------
    -- Ada_Node --
    --------------
+
+   function Ada_Node_P_Can_Reach
+     (Node, From_Node : Bare_Ada_Node) return Boolean;
 
    function Ada_Node_P_Get_Unit
      (Node               : Bare_Ada_Node;
@@ -40,16 +25,29 @@ package Libadalang.Implementation.Extensions is
    function Ada_Node_P_Standard_Unit
      (Node : Bare_Ada_Node) return Internal_Unit;
 
+   function Ada_Node_P_Is_Keyword
+     (Node             : Bare_Ada_Node;
+      Token            : Token_Reference;
+      Language_Version : Symbol_Type) return Boolean;
+
    function Ada_Node_P_Filter_Is_Imported_By
      (Node       : Bare_Ada_Node;
       Units      : Internal_Unit_Array_Access;
       Transitive : Boolean) return Internal_Unit_Array_Access;
 
    function Ada_Node_P_Resolve_Own_Names
-     (Node   : Bare_Ada_Node;
-      Env    : Lexical_Env;
-      Origin : Bare_Ada_Node;
-      E_Info : Internal_Entity_Info := No_Entity_Info) return Boolean;
+     (Node                 : Bare_Ada_Node;
+      Generate_Diagnostics : Boolean;
+      Env                  : Lexical_Env;
+      Origin               : Bare_Ada_Node;
+      Entry_Point          : Bare_Ada_Node;
+      E_Info               : Internal_Entity_Info := No_Entity_Info)
+      return Boolean;
+
+   function Ada_Node_P_Own_Nameres_Diagnostics
+     (Node                 : Bare_Ada_Node;
+      E_Info               : Internal_Entity_Info := No_Entity_Info)
+      return Internal_Solver_Diagnostic_Array_Access;
 
    -------------
    -- Base_Id --
@@ -86,6 +84,19 @@ package Libadalang.Implementation.Extensions is
    function Compilation_Unit_P_Get_Empty_Env
      (Node : Bare_Compilation_Unit) return Lexical_Env;
 
+   function Compilation_Unit_P_External_Config_Pragmas
+     (Node : Bare_Compilation_Unit) return Bare_Pragma_Node_Array_Access;
+
+   function Compilation_Unit_P_Stub_For_Impl
+     (Node : Bare_Compilation_Unit; Su : Bare_Subunit) return Bare_Body_Stub;
+
+   -------------------
+   -- Defining_Name --
+   -------------------
+
+   function Defining_Name_Short_Image
+     (Node : Bare_Defining_Name) return Text_Type;
+
    ----------
    -- Expr --
    ----------
@@ -120,6 +131,8 @@ package Libadalang.Implementation.Extensions is
 
    function Expr_P_Type_Var (Node : Bare_Expr) return Logic_Var;
 
+   function Expr_P_Expected_Type_Var (Node : Bare_Expr) return Logic_Var;
+
    ---------------------
    -- Single_Tok_Node --
    ---------------------
@@ -129,5 +142,18 @@ package Libadalang.Implementation.Extensions is
 
    function Single_Tok_Node_P_Subp_Spec_Var
      (Node : Bare_Single_Tok_Node) return Logic_Var;
+
+   ------------------------
+   -- Cache Invalidation --
+   ------------------------
+
+   function Should_Collect_Env_Caches
+     (Ctx                        : Internal_Context;
+      Unit                       : Internal_Unit;
+      All_Env_Caches_Entry_Count : Long_Long_Natural) return Boolean;
+   --  Decide whether the lexical envs in the given unit should be collected
+   --  or not by combining various data we have been keeping track of about
+   --  their usage. See comments in the implementation for more details about
+   --  what is considered in the heuristics.
 
 end Libadalang.Implementation.Extensions;

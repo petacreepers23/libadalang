@@ -1,11 +1,15 @@
 import os
 import os.path
 import sys
+from typing import Dict, List, Optional, Tuple, Union
 
+from e3.fs import sync_tree
 from e3.testsuite.control import YAMLTestControlCreator
 from e3.testsuite.driver.classic import (TestAbortWithError,
                                          TestAbortWithFailure, TestSkip)
-from e3.testsuite.driver.diff import DiffTestDriver
+from e3.testsuite.driver.diff import (
+    DiffTestDriver, PatternSubstitute, Substitute
+)
 
 from drivers.valgrind import Valgrind
 
@@ -15,12 +19,40 @@ class BaseDriver(DiffTestDriver):
     Base class to provide common test driver helpers.
     """
 
+    perf_supported = False
+    """
+    Whether this driver supports the perf mode.
+    """
+
+    @property
+    def perf_mode(self) -> bool:
+        """
+        Return whether the performance mode is active.
+        """
+        return self.env.options.perf_mode
+
+    @property
+    def default_process_timeout(self):
+        # In perf mode, disable process timeout as some profiling operations
+        # can take a really long time to complete, and this is both okay and
+        # hard to measure.
+        return None if self.perf_mode else super().default_process_timeout
+
     @property
     def test_control_creator(self):
         return YAMLTestControlCreator(self.env.control_condition_env)
 
     def set_up(self):
         super().set_up()
+
+        # Allow tests to copy directories from the test directory tree in their
+        # working dir, such as common dependencies between multiple tests.
+        for path in self.test_env.get("sync_trees", []):
+            sync_tree(
+                self.test_dir(path),
+                self.working_dir(),
+                delete=False,
+            )
 
         # If requested, skip internal testcases
         if (
@@ -53,6 +85,49 @@ class BaseDriver(DiffTestDriver):
         self.use_testsuite_python = bool(
             self.test_env.get('use_testsuite_python', False)
         )
+
+        # If we are running this on Windows and this testcase has a
+        # Windows-specific baseline, use it.
+        windows_baseline_file = self.test_env.get("windows_baseline_file")
+        if self.env.build.os.name == "windows" and windows_baseline_file:
+            self.test_env.setdefault("baseline_file", windows_baseline_file)
+
+        # Run custom Python setup code from the "test.yaml" file, if present
+        setup_script = self.test_env.get("setup_script")
+        if setup_script:
+            exec(setup_script, {"self": self})
+
+    @property
+    def baseline(self) -> Tuple[Optional[str], Union[str, bytes], bool]:
+        # In perf mode, our purpose is to measure performance, not to check
+        # results.
+        return (None, "", False) if self.perf_mode else super().baseline
+
+    @property
+    def output_refiners(self):
+        result = super().output_refiners
+
+        # Replace references to the working directory with a placeholder, so
+        # that baselines are not influenced by where the testsuite is run.
+        pattern = self.working_dir()
+        repl = "<working-dir>"
+        if self.default_encoding == "binary":
+            pattern = pattern.encode("ascii")
+            repl = repl.encode("ascii")
+        result.append(Substitute(pattern, repl))
+
+        # If requested, canonicalize Windows-style directory separators to
+        # Unix-style.
+        if self.test_env.get("canonicalize_directory_separators", False):
+            result.append(Substitute("\\", "/"))
+
+        # If requested, canonicalize native targets, which GPR can mention
+        if self.test_env.get("canonicalize_native_target", False):
+            result.append(
+                PatternSubstitute("target '[a-z0-9_-]+'", "target '<native>'")
+            )
+
+        return result
 
     @property
     def disable_shared(self):
@@ -121,6 +196,23 @@ class BaseDriver(DiffTestDriver):
     # Run helpers
     #
 
+    def subp_env(self, env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """
+        Return the environment to use for a subprocess.
+
+        :param env: Variables to define in the subprocess. They overwrite in
+            the subprocess variables defined for the current process.
+        """
+        result = dict(os.environ)
+        if env:
+            result.update(env)
+
+            self.result.log += "Env:\n"
+            for name, value in sorted(env.items()):
+                self.result.log += f"  {name}={value}\n"
+
+        return result
+
     def run_and_check(self, argv, memcheck=False, append_output=True,
                       status_code=0, encoding=None, env=None):
         """
@@ -135,13 +227,7 @@ class BaseDriver(DiffTestDriver):
         In case of failure, the test output is appended to the actual output
         and a TestError is raised.
         """
-        # Depending on the testsuite engine (gnatpython.testsuite or polyfill),
-        # all test drivers can run in the same process. Because of this, we
-        # must avoid concurrent mutations of the environment: work on a copy
-        # instead.
-        subp_env = dict(os.environ)
-        if env:
-            subp_env.update(env)
+        subp_env = self.subp_env(env)
 
         # If this testcase produced trace files, move them to the
         # testsuite-wide directory for later use.
@@ -180,6 +266,108 @@ class BaseDriver(DiffTestDriver):
             self.valgrind_errors.extend(self.valgrind.parse_report())
 
         return p.out
+
+    def run_for_perf(self,
+                     argv: List[str],
+                     env: Optional[Dict[str, str]] = None) -> None:
+        """
+        Run a subprocess and collect performance data from it.
+
+        Time and memory metrics go to the ``TestResult.info`` table:
+
+        * The "time" entry contains a space-separated list of floats for the
+          time in seconds it took to run each instance of the subprocess.
+
+        * The "memory" entry contains a space-separated list of integers for
+          the approximative number of bytes each instance of the subprocess
+          allocated.
+
+        When created, files for time and memory profiles go to the "perf"
+        working directory and the corresponding file names are stored in the
+        "time-profile" and "memory-profile" entries in the ``TestResult.info``
+        table.
+        """
+        perf_dir = self.env.perf_dir
+
+        # Common arguments for "self.shell"
+        subp_env = self.subp_env(env)
+        cwd = self.working_dir()
+
+        def run(*prefix: str) -> str:
+            """
+            Run the subprocess with the "prefix" additional arguments. Return
+            the subprocess output.
+            """
+            return self.shell(
+                args=list(prefix) + argv,
+                cwd=cwd, env=subp_env,
+                analyze_output=False
+            ).out
+
+        def data_file(suffix: str) -> str:
+            """
+            Return the name of the data file to use for this test, with the
+            given suffix.
+            """
+            return f"{self.test_name}___{suffix}"
+
+        # Run the subprocess in each of the requested performance measuring
+        # mode.
+        for mode, param in self.test_env["perf"].items():
+            if mode == "default":
+                # Run the subprocess several time under "time" to get its
+                # execution time + maximum resident set size (memory occupied).
+                time_list: List[str] = []
+                memory_list: List[str] = []
+                for i in range(param):
+                    result = run("time", "-f", "%M %e")
+                    memory, time = result.split()
+                    time_list.append(time)
+                    memory_list.append(str(int(memory) * 1024))
+                self.result.info["time"] = " ".join(time_list)
+                self.result.info["memory"] = " ".join(memory_list)
+
+            elif mode == "callgrind":
+                result = run("valgrind", "--tool=callgrind")
+                # Callgrind outputs the number of executed instructions in its
+                # trace. Search for the line containing "Collected".
+                ir = "0"
+                for line in reversed(result.splitlines()):
+                    if "Collected" in line:
+                        ir = line.split()[-1]
+                        break
+                self.result.info["callgrind"] = ir
+
+            elif self.env.perf_no_profile:
+                # If we are asked for this testsuite run not to compute
+                # profiles, skip to the next mode.
+                continue
+
+            elif mode == "profile-time":
+                # Run the subprocess under "perf record" to get a profile (and
+                # eventually a frame graph).
+                f = data_file("perf.data")
+                run(
+                    "perf",
+                    "record",
+                    "--call-graph=dwarf",
+                    "-F100",
+                    "-o",
+                    os.path.join(perf_dir, f),
+                    "--"
+                )
+                self.result.info["time-profile"] = f
+
+            elif mode == "profile-memory":
+                # Run the subprocess under valgrind/massif to analyze where
+                # memory is allocated.
+                f = data_file("massif.data")
+                fabs = os.path.join(perf_dir, f)
+                run("valgrind", "--tool=massif", f"--massif-out-file={fabs}")
+                self.result.info["memory-profile"] = f
+
+            else:
+                raise TestAbortWithError(f"invalid perf mode: {mode}")
 
     @property
     def gpr_scenario_vars(self):
